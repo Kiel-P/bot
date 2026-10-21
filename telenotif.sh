@@ -171,11 +171,12 @@ is_device_online() {
     return 1
 }
 
-# Kirim pesan selamat datang
+# Kirim Pesan Selamat Datang (Format Multi-line Aman)
 START_MSG="🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
 Sistem siap memantau jaringan <b>${ROUTER_NAME}</b>.
 ===========================
                  By. K I H E O"
+
 send_telegram "$START_MSG"
 
 while true; do
@@ -313,6 +314,9 @@ chmod +x /etc/init.d/telenotif
 else
     nohup /usr/bin/telenotif >/dev/null 2>&1 &
 fi
+
+# Panggil langsung eksekusi awal pesan pembuka ke telegram
+/usr/bin/telenotif >/dev/null 2>&1 &
 
 printf "\n${CYAN}====================================================${NC}\n"
 printf "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}\n"
