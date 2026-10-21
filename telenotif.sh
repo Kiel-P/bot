@@ -154,16 +154,19 @@ get_device_name() {
     fi
 }
 
+# Pengecekan Aktif dengan PING Real-Time
 is_device_online() {
     local ip="$1"
     local mac="$2"
 
-    if ping -c 2 -W 1 "$ip" > /dev/null 2>&1; then
+    # Ping 1 kali dengan response cepat (1 detik)
+    if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then
         return 0
     fi
 
+    # Verifikasi tambahan jika interface wifi terdeteksi
     if command -v ip >/dev/null 2>&1; then
-        if ip neigh show | grep -i "$mac" | grep -qv "REACHABLE\|STALE\|DELAY"; then
+        if ip neigh show | grep -i "$mac" | grep -q "REACHABLE"; then
             return 0
         fi
     fi
@@ -171,7 +174,7 @@ is_device_online() {
     return 1
 }
 
-# Kirim Pesan Selamat Datang (Format Multi-line Aman)
+# Kirim Pesan Selamat Datang
 START_MSG="🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
 Sistem siap memantau jaringan <b>${ROUTER_NAME}</b>.
 ===========================
@@ -243,7 +246,8 @@ while true; do
         mv "$TEMP_STATE" "$STATE_FILE"
     fi
 
-    sleep 10
+    # Interval dipersingkat ke 3 detik agar ping responsif & cepat terdeteksi
+    sleep 3
 done
 EOF
 
@@ -315,7 +319,7 @@ else
     nohup /usr/bin/telenotif >/dev/null 2>&1 &
 fi
 
-# Panggil langsung eksekusi awal pesan pembuka ke telegram
+# Panggil eksekusi latar belakang
 /usr/bin/telenotif >/dev/null 2>&1 &
 
 printf "\n${CYAN}====================================================${NC}\n"
