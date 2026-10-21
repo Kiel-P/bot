@@ -8,23 +8,33 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Fungsi Animasi Spinner (Kompatibel OpenWrt Ash)
+# Pastikan input berasal dari terminal interaktif (fix read saat dipipa via curl/wget)
+exec < /dev/tty 2>/dev/null || exec < /dev/console 2>/dev/null
+
+# Fungsi Animasi Spinner (Kompatibel OpenWrt BusyBox)
 show_spinner() {
     local pid=$1
-    local delay=0.1
+    local delay=1
     
     printf "\033[?25l" # Sembunyikan kursor
     
     while kill -0 "$pid" 2>/dev/null; do
-        for char in '|' '/' '-' '\\'; do
-            printf " [%s]  " "$char"
-            sleep $delay
-            printf "\b\b\b\b\b\b"
-        done
+        printf " [/]  "
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+        printf " [-]  "
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+        printf " [\\\\]  "
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+        printf " [|]  "
+        sleep $delay
+        printf "\b\b\b\b\b\b"
     done
     
     printf "      \b\b\b\b\b\b"
-    printf "\033[?25h" # Tampilkan kursor kembali
+    printf "\033[?25h" # Tampilkan kursor
 }
 
 clear
@@ -61,7 +71,7 @@ INSTALL_PID=$!
 printf "    ${YELLOW}Mengunduh & Memasang Modul...${NC}"
 show_spinner $INSTALL_PID
 
-printf "\r${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
+printf "\r\033[K${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
 
 # 2. Input Konfigurasi dari Pengguna
 printf "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}\n"
