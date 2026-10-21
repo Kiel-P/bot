@@ -1,57 +1,48 @@
 #!/bin/sh
 
-# ====================================================
-#  INSTALLER NOTIFIKASI TELEGRAM BY.KIHEO
-# ====================================================
-
 # Color Palette
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Fungsi Animasi Spinner
+# Fungsi Animasi Spinner (Kompatibel OpenWrt Ash)
 show_spinner() {
     local pid=$1
     local delay=0.1
-    local spinstr='|/-\'
     
-    # Hide cursor
-    printf "\033[?25l"
+    printf "\033[?25l" # Sembunyikan kursor
     
-    while [ "$(ps | grep "$pid" | grep -v grep)" ]; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b\b"
+    while kill -0 "$pid" 2>/dev/null; do
+        for char in '|' '/' '-' '\\'; do
+            printf " [%s]  " "$char"
+            sleep $delay
+            printf "\b\b\b\b\b\b"
+        done
     done
     
-    # Restore cursor
     printf "      \b\b\b\b\b\b"
-    printf "\033[?25h"
+    printf "\033[?25h" # Tampilkan kursor kembali
 }
 
 clear
 
 # Banner Pembukaan
-echo -e "${CYAN}====================================================${NC}"
-echo -e "${YELLOW}       NOTIFIKASI TELEGRAM BY.KIHEO               ${NC}"
-echo -e "${CYAN}====================================================${NC}"
-echo -e "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}"
-echo -e "${CYAN}====================================================${NC}\n"
+printf "${CYAN}====================================================${NC}\n"
+printf "${YELLOW}       NOTIFIKASI TELEGRAM BY.KIHEO               ${NC}\n"
+printf "${CYAN}====================================================${NC}\n"
+printf "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}\n"
+printf "${CYAN}====================================================${NC}\n\n"
 
-# 1. Pengecekan & Instalasi Dependensi dengan Animasi
-echo -e "${BLUE}[1/4] Memeriksa & Menginstall Modul Pendukung...${NC}"
+# 1. Pengecekan & Instalasi Dependensi
+printf "${BLUE}[1/4] Memeriksa & Menginstall Modul Pendukung...${NC}\n"
 
 install_packages() {
     if command -v opkg >/dev/null 2>&1; then
         opkg update >/dev/null 2>&1
-        
-        REQUIRED_PKGS="curl ip-full iw bash"
-        for pkg in $REQUIRED_PKGS; do
+        for pkg in curl ip-full iw bash; do
             if ! opkg list-installed | grep -q "^$pkg "; then
                 opkg install "$pkg" >/dev/null 2>&1
             fi
@@ -62,39 +53,46 @@ install_packages() {
     fi
 }
 
-# Jalankan instalasi di latar belakang
+# Jalankan instalasi di background
 install_packages &
 INSTALL_PID=$!
 
-# Tampilkan teks & animasi pemrosesan
+# Tampilkan animasi
 printf "    ${YELLOW}Mengunduh & Memasang Modul...${NC}"
 show_spinner $INSTALL_PID
 
-echo -e "\r${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n"
+printf "\r${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
 
-# 2. Input Konfigurasi dari Pengguna
-echo -e "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}"
-echo -e "${YELLOW}----------------------------------------------------${NC}"
+# 2. Input Konfigurasi dari Pengguna (Gunakan echo + read standar sh)
+printf "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}\n"
+printf "${YELLOW}----------------------------------------------------${NC}\n"
 
-read -p "Masukkan Token Bot Telegram : " USER_TOKEN
+USER_TOKEN=""
 while [ -z "$USER_TOKEN" ]; do
-    echo -e "${RED}Token Bot tidak boleh kosong!${NC}"
-    read -p "Masukkan Token Bot Telegram : " USER_TOKEN
+    printf "Masukkan Token Bot Telegram : "
+    read USER_TOKEN
+    if [ -z "$USER_TOKEN" ]; then
+        printf "${RED}Token Bot tidak boleh kosong!${NC}\n"
+    fi
 done
 
-read -p "Masukkan Chat ID Telegram  : " USER_CHAT_ID
+USER_CHAT_ID=""
 while [ -z "$USER_CHAT_ID" ]; do
-    echo -e "${RED}Chat ID tidak boleh kosong!${NC}"
-    read -p "Masukkan Chat ID Telegram  : " USER_CHAT_ID
+    printf "Masukkan Chat ID Telegram  : "
+    read USER_CHAT_ID
+    if [ -z "$USER_CHAT_ID" ]; then
+        printf "${RED}Chat ID tidak boleh kosong!${NC}\n"
+    fi
 done
 
-read -p "Masukkan Nama Router [Default: KIEL] : " USER_ROUTER_NAME
+printf "Masukkan Nama Router [Default: KIEL] : "
+read USER_ROUTER_NAME
 ROUTER_NAME=${USER_ROUTER_NAME:-KIEL}
 
-echo -e "${GREEN}✔ Konfigurasi berhasil disimpan!${NC}\n"
+printf "${GREEN}✔ Konfigurasi berhasil disimpan!${NC}\n\n"
 
 # 3. Membuat Script Utama (/usr/bin/kiheo-bot)
-echo -e "${BLUE}[3/4] Membuat File Script Utama...${NC}"
+printf "${BLUE}[3/4] Membuat File Script Utama...${NC}\n"
 
 cat << 'EOF' > /usr/bin/kiheo-bot
 #!/bin/sh
@@ -153,7 +151,7 @@ is_device_online() {
     return 1
 }
 
-# Kirim Notifikasi Start/Restart Bot
+# Send Welcome Message
 send_telegram "🤖 <b>Bot Notifikasi Berhasil Aktif!</b>%0ASistem siap memantau jaringan <b>${ROUTER_NAME}</b>.%0A===========================%0A                 By. K I H E O"
 
 while true; do
@@ -224,17 +222,17 @@ while true; do
 done
 EOF
 
-# Subtitusi Token, Chat ID, & Nama Router ke file yang baru dibuat
+# Subtitusi Token, Chat ID, & Nama Router
 sed -i "s|CONF_TOKEN|${USER_TOKEN}|g" /usr/bin/kiheo-bot
 sed -i "s|CONF_CHAT_ID|${USER_CHAT_ID}|g" /usr/bin/kiheo-bot
 sed -i "s|CONF_ROUTER_NAME|${ROUTER_NAME}|g" /usr/bin/kiheo-bot
 
 chmod +x /usr/bin/kiheo-bot
 
-echo -e "${GREEN}✔ File bot dibuat di /usr/bin/kiheo-bot${NC}\n"
+printf "${GREEN}✔ File bot dibuat di /usr/bin/kiheo-bot${NC}\n\n"
 
-# 4. Membuat Service Auto-start (Procd Service untuk OpenWrt)
-echo -e "${BLUE}[4/4] Mengatur Layanan Latar Belakang (Auto-Start)...${NC}"
+# 4. Membuat Service Auto-start
+printf "${BLUE}[4/4] Mengatur Layanan Latar Belakang (Auto-Start)...${NC}\n"
 
 if [ -d "/etc/init.d" ]; then
 cat << 'EOF' > /etc/init.d/kiheobot
@@ -266,9 +264,9 @@ else
     nohup /usr/bin/kiheo-bot >/dev/null 2>&1 &
 fi
 
-echo -e "\n${CYAN}====================================================${NC}"
-echo -e "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}"
-echo -e "${CYAN}====================================================${NC}"
-echo -e "Status Bot : ${YELLOW}Berjalan di latar belakang (Background Process)${NC}"
-echo -e "Cek pesan Telegram Anda untuk konfirmasi pesan aktif."
-echo -e "${CYAN}====================================================${NC}\n"
+printf "\n${CYAN}====================================================${NC}\n"
+printf "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}\n"
+printf "${CYAN}====================================================${NC}\n"
+printf "Status Bot : ${YELLOW}Berjalan di latar belakang (Background Process)${NC}\n"
+printf "Cek pesan Telegram Anda untuk konfirmasi pesan aktif.\n"
+printf "${CYAN}====================================================${NC}\n\n"
