@@ -8,9 +8,6 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Pastikan membaca input keyboard secara interaktif di STB
-exec < /dev/tty 2>/dev/null || exec < /dev/console 2>/dev/null
-
 clear
 
 # Banner Pembukaan
@@ -20,27 +17,22 @@ printf "${CYAN}====================================================${NC}\n"
 printf "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}\n"
 printf "${CYAN}====================================================${NC}\n\n"
 
-# 1. Pengecekan & Instalasi Dependensi (Animasi Titik Sederhana Kompatibel BusyBox)
+# 1. Pengecekan & Instalasi Dependensi
 printf "${BLUE}[1/4] Memeriksa & Menginstall Modul Pendukung...${NC}\n"
-printf "    ${YELLOW}Sedang memproses, mohon tunggu${NC}"
 
-# Loop indikator sederhana tanpa subshell background
 if command -v opkg >/dev/null 2>&1; then
-    printf "."
     opkg update >/dev/null 2>&1
     for pkg in curl ip-full iw bash; do
-        printf "."
         if ! opkg list-installed | grep -q "^$pkg "; then
             opkg install "$pkg" >/dev/null 2>&1
         fi
     done
 elif command -v apt-get >/dev/null 2>&1; then
-    printf "."
     apt-get update -y >/dev/null 2>&1
     apt-get install -y curl iproute2 iw >/dev/null 2>&1
 fi
 
-printf "\n\r${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
+printf "${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
 
 # 2. Input Konfigurasi dari Pengguna
 printf "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}\n"
