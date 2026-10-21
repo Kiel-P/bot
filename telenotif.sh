@@ -63,7 +63,7 @@ show_spinner $INSTALL_PID
 
 printf "\r${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
 
-# 2. Input Konfigurasi dari Pengguna (Gunakan echo + read standar sh)
+# 2. Input Konfigurasi dari Pengguna
 printf "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}\n"
 printf "${YELLOW}----------------------------------------------------${NC}\n"
 
@@ -91,10 +91,10 @@ ROUTER_NAME=${USER_ROUTER_NAME:-KIEL}
 
 printf "${GREEN}✔ Konfigurasi berhasil disimpan!${NC}\n\n"
 
-# 3. Membuat Script Utama (/usr/bin/kiheo-bot)
+# 3. Membuat Script Utama (/usr/bin/telenotif)
 printf "${BLUE}[3/4] Membuat File Script Utama...${NC}\n"
 
-cat << 'EOF' > /usr/bin/kiheo-bot
+cat << 'EOF' > /usr/bin/telenotif
 #!/bin/sh
 
 TELEGRAM_TOKEN="CONF_TOKEN"
@@ -151,7 +151,7 @@ is_device_online() {
     return 1
 }
 
-# Send Welcome Message
+# Kirim pesan selamat datang
 send_telegram "🤖 <b>Bot Notifikasi Berhasil Aktif!</b>%0ASistem siap memantau jaringan <b>${ROUTER_NAME}</b>.%0A===========================%0A                 By. K I H E O"
 
 while true; do
@@ -222,27 +222,27 @@ while true; do
 done
 EOF
 
-# Subtitusi Token, Chat ID, & Nama Router
-sed -i "s|CONF_TOKEN|${USER_TOKEN}|g" /usr/bin/kiheo-bot
-sed -i "s|CONF_CHAT_ID|${USER_CHAT_ID}|g" /usr/bin/kiheo-bot
-sed -i "s|CONF_ROUTER_NAME|${ROUTER_NAME}|g" /usr/bin/kiheo-bot
+# Subtitusi Konfigurasi
+sed -i "s|CONF_TOKEN|${USER_TOKEN}|g" /usr/bin/telenotif
+sed -i "s|CONF_CHAT_ID|${USER_CHAT_ID}|g" /usr/bin/telenotif
+sed -i "s|CONF_ROUTER_NAME|${ROUTER_NAME}|g" /usr/bin/telenotif
 
-chmod +x /usr/bin/kiheo-bot
+chmod +x /usr/bin/telenotif
 
-printf "${GREEN}✔ File bot dibuat di /usr/bin/kiheo-bot${NC}\n\n"
+printf "${GREEN}✔ File bot dibuat di /usr/bin/telenotif${NC}\n\n"
 
 # 4. Membuat Service Auto-start
 printf "${BLUE}[4/4] Mengatur Layanan Latar Belakang (Auto-Start)...${NC}\n"
 
 if [ -d "/etc/init.d" ]; then
-cat << 'EOF' > /etc/init.d/kiheobot
+cat << 'EOF' > /etc/init.d/telenotif
 #!/bin/sh /etc/rc.common
 
 START=99
 STOP=10
 
 USE_PROCD=1
-PROG=/usr/bin/kiheo-bot
+PROG=/usr/bin/telenotif
 
 start_service() {
     procd_open_instance
@@ -252,16 +252,16 @@ start_service() {
 }
 
 stop_service() {
-    killall kiheo-bot 2>/dev/null
+    killall telenotif 2>/dev/null
 }
 EOF
 
-chmod +x /etc/init.d/kiheobot
-/etc/init.d/kiheobot enable
-/etc/init.d/kiheobot restart
+chmod +x /etc/init.d/telenotif
+/etc/init.d/telenotif enable
+/etc/init.d/telenotif restart
 else
-    killall kiheo-bot 2>/dev/null
-    nohup /usr/bin/kiheo-bot >/dev/null 2>&1 &
+    killall telenotif 2>/dev/null
+    nohup /usr/bin/telenotif >/dev/null 2>&1 &
 fi
 
 printf "\n${CYAN}====================================================${NC}\n"
