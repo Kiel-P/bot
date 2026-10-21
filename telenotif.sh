@@ -12,6 +12,28 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Fungsi Animasi Spinner
+show_spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    
+    # Hide cursor
+    printf "\033[?25l"
+    
+    while [ "$(ps | grep "$pid" | grep -v grep)" ]; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    
+    # Restore cursor
+    printf "      \b\b\b\b\b\b"
+    printf "\033[?25h"
+}
+
 clear
 
 # Banner Pembukaan
@@ -21,27 +43,34 @@ echo -e "${CYAN}====================================================${NC}"
 echo -e "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}"
 echo -e "${CYAN}====================================================${NC}\n"
 
-# 1. Pengecekan & Instalasi Dependensi
+# 1. Pengecekan & Instalasi Dependensi dengan Animasi
 echo -e "${BLUE}[1/4] Memeriksa & Menginstall Modul Pendukung...${NC}"
 
-if command -v opkg >/dev/null 2>&1; then
-    echo "Sistem OpenWrt terdeteksi. Memperbarui daftar paket..."
-    opkg update >/dev/null 2>&1
-    
-    REQUIRED_PKGS="curl ip-full iw bash"
-    for pkg in $REQUIRED_PKGS; do
-        if ! opkg list-installed | grep -q "^$pkg "; then
-            echo "Menginstall $pkg..."
-            opkg install "$pkg" >/dev/null 2>&1
-        fi
-    done
-elif command -v apt-get >/dev/null 2>&1; then
-    echo "Sistem Debian/Ubuntu terdeteksi. Memperbarui paket..."
-    apt-get update -y >/dev/null 2>&1
-    apt-get install -y curl iproute2 iw >/dev/null 2>&1
-fi
+install_packages() {
+    if command -v opkg >/dev/null 2>&1; then
+        opkg update >/dev/null 2>&1
+        
+        REQUIRED_PKGS="curl ip-full iw bash"
+        for pkg in $REQUIRED_PKGS; do
+            if ! opkg list-installed | grep -q "^$pkg "; then
+                opkg install "$pkg" >/dev/null 2>&1
+            fi
+        done
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y curl iproute2 iw >/dev/null 2>&1
+    fi
+}
 
-echo -e "${GREEN}✔ Semua modul pendukung siap!${NC}\n"
+# Jalankan instalasi di latar belakang
+install_packages &
+INSTALL_PID=$!
+
+# Tampilkan teks & animasi pemrosesan
+printf "    ${YELLOW}Mengunduh & Memasang Modul...${NC}"
+show_spinner $INSTALL_PID
+
+echo -e "\r${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n"
 
 # 2. Input Konfigurasi dari Pengguna
 echo -e "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}"
@@ -191,7 +220,7 @@ while true; do
         mv "$TEMP_STATE" "$STATE_FILE"
     fi
 
-    sleep 2
+    sleep 10
 done
 EOF
 
@@ -233,7 +262,6 @@ chmod +x /etc/init.d/kiheobot
 /etc/init.d/kiheobot enable
 /etc/init.d/kiheobot restart
 else
-    # Fallback untuk sistem non-OpenWrt biasa (Background process)
     killall kiheo-bot 2>/dev/null
     nohup /usr/bin/kiheo-bot >/dev/null 2>&1 &
 fi
@@ -242,5 +270,5 @@ echo -e "\n${CYAN}====================================================${NC}"
 echo -e "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}"
 echo -e "${CYAN}====================================================${NC}"
 echo -e "Status Bot : ${YELLOW}Berjalan di latar belakang (Background Process)${NC}"
-echo -e "Cek status Telegram Anda untuk konfirmasi pesan selamat datang."
+echo -e "Cek pesan Telegram Anda untuk konfirmasi pesan aktif."
 echo -e "${CYAN}====================================================${NC}\n"
