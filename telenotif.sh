@@ -127,7 +127,11 @@ is_device_online() {
 }
 
 # Kirim pesan selamat datang
-send_telegram "🤖 <b>Bot Notifikasi Berhasil Aktif!</b>%0ASistem siap memantau jaringan <b>${ROUTER_NAME}</b>.%0A===========================%0A                 By. K I H E O"
+START_MSG="🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
+Sistem siap memantau jaringan <b>${ROUTER_NAME}</b>.
+===========================
+                 By. K I H E O"
+send_telegram "$START_MSG"
 
 while true; do
     > "$CURRENT_FILE"
@@ -239,6 +243,8 @@ printf "${GREEN}✔ File uninstall dibuat di /usr/bin/unbotnotif${NC}\n\n"
 # 5. Membuat Service Auto-start
 printf "${BLUE}[4/4] Mengatur Layanan Latar Belakang (Auto-Start)...${NC}\n"
 
+killall telenotif 2>/dev/null
+
 if [ -d "/etc/init.d" ]; then
 cat << 'EOF' > /etc/init.d/telenotif
 #!/bin/sh /etc/rc.common
@@ -246,26 +252,20 @@ cat << 'EOF' > /etc/init.d/telenotif
 START=99
 STOP=10
 
-USE_PROCD=1
-PROG=/usr/bin/telenotif
-
-start_service() {
-    procd_open_instance
-    procd_set_param command $PROG
-    procd_set_param respawn
-    procd_close_instance
+start() {
+    killall telenotif 2>/dev/null
+    /usr/bin/telenotif >/dev/null 2>&1 &
 }
 
-stop_service() {
+stop() {
     killall telenotif 2>/dev/null
 }
 EOF
 
 chmod +x /etc/init.d/telenotif
-/etc/init.d/telenotif enable
-/etc/init.d/telenotif restart
+/etc/init.d/telenotif enable 2>/dev/null
+/etc/init.d/telenotif start 2>/dev/null
 else
-    killall telenotif 2>/dev/null
     nohup /usr/bin/telenotif >/dev/null 2>&1 &
 fi
 
