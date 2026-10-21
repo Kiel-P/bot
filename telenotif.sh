@@ -8,34 +8,8 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Pastikan input berasal dari terminal interaktif (fix read saat dipipa via curl/wget)
+# Pastikan membaca input keyboard secara interaktif di STB
 exec < /dev/tty 2>/dev/null || exec < /dev/console 2>/dev/null
-
-# Fungsi Animasi Spinner (Kompatibel OpenWrt BusyBox)
-show_spinner() {
-    local pid=$1
-    local delay=1
-    
-    printf "\033[?25l" # Sembunyikan kursor
-    
-    while kill -0 "$pid" 2>/dev/null; do
-        printf " [/]  "
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-        printf " [-]  "
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-        printf " [\\\\]  "
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-        printf " [|]  "
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-    done
-    
-    printf "      \b\b\b\b\b\b"
-    printf "\033[?25h" # Tampilkan kursor
-}
 
 clear
 
@@ -46,32 +20,27 @@ printf "${CYAN}====================================================${NC}\n"
 printf "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}\n"
 printf "${CYAN}====================================================${NC}\n\n"
 
-# 1. Pengecekan & Instalasi Dependensi
+# 1. Pengecekan & Instalasi Dependensi (Animasi Titik Sederhana Kompatibel BusyBox)
 printf "${BLUE}[1/4] Memeriksa & Menginstall Modul Pendukung...${NC}\n"
+printf "    ${YELLOW}Sedang memproses, mohon tunggu${NC}"
 
-install_packages() {
-    if command -v opkg >/dev/null 2>&1; then
-        opkg update >/dev/null 2>&1
-        for pkg in curl ip-full iw bash; do
-            if ! opkg list-installed | grep -q "^$pkg "; then
-                opkg install "$pkg" >/dev/null 2>&1
-            fi
-        done
-    elif command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y curl iproute2 iw >/dev/null 2>&1
-    fi
-}
+# Loop indikator sederhana tanpa subshell background
+if command -v opkg >/dev/null 2>&1; then
+    printf "."
+    opkg update >/dev/null 2>&1
+    for pkg in curl ip-full iw bash; do
+        printf "."
+        if ! opkg list-installed | grep -q "^$pkg "; then
+            opkg install "$pkg" >/dev/null 2>&1
+        fi
+    done
+elif command -v apt-get >/dev/null 2>&1; then
+    printf "."
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y curl iproute2 iw >/dev/null 2>&1
+fi
 
-# Jalankan instalasi di background
-install_packages &
-INSTALL_PID=$!
-
-# Tampilkan animasi
-printf "    ${YELLOW}Mengunduh & Memasang Modul...${NC}"
-show_spinner $INSTALL_PID
-
-printf "\r\033[K${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
+printf "\n\r${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
 
 # 2. Input Konfigurasi dari Pengguna
 printf "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}\n"
@@ -97,7 +66,11 @@ done
 
 printf "Masukkan Nama Router [Default: KIEL] : "
 read USER_ROUTER_NAME
-ROUTER_NAME=${USER_ROUTER_NAME:-KIEL}
+if [ -z "$USER_ROUTER_NAME" ]; then
+    ROUTER_NAME="KIEL"
+else
+    ROUTER_NAME="$USER_ROUTER_NAME"
+fi
 
 printf "${GREEN}✔ Konfigurasi berhasil disimpan!${NC}\n\n"
 
@@ -239,9 +212,39 @@ sed -i "s|CONF_ROUTER_NAME|${ROUTER_NAME}|g" /usr/bin/telenotif
 
 chmod +x /usr/bin/telenotif
 
-printf "${GREEN}✔ File bot dibuat di /usr/bin/telenotif${NC}\n\n"
+# 4. Membuat Perintah Uninstall (/usr/bin/unbotnotif)
+cat << 'EOF' > /usr/bin/unbotnotif
+#!/bin/sh
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-# 4. Membuat Service Auto-start
+printf "${CYAN}====================================================${NC}\n"
+printf "${RED}       UNINSTALL NOTIFIKASI TELEGRAM BY.KIHEO      ${NC}\n"
+printf "${CYAN}====================================================${NC}\n"
+
+if [ -f /etc/init.d/telenotif ]; then
+    /etc/init.d/telenotif disable 2>/dev/null
+    /etc/init.d/telenotif stop 2>/dev/null
+    rm -f /etc/init.d/telenotif
+fi
+
+killall telenotif 2>/dev/null
+rm -f /usr/bin/telenotif
+rm -f /tmp/known_macs.txt /tmp/current_active.txt /tmp/temp_state.txt
+
+printf "${GREEN}✔ Bot notifikasi telegram berhasil dihapus total!${NC}\n"
+printf "${CYAN}====================================================${NC}\n"
+rm -f /usr/bin/unbotnotif
+EOF
+
+chmod +x /usr/bin/unbotnotif
+
+printf "${GREEN}✔ File bot dibuat di /usr/bin/telenotif${NC}\n"
+printf "${GREEN}✔ File uninstall dibuat di /usr/bin/unbotnotif${NC}\n\n"
+
+# 5. Membuat Service Auto-start
 printf "${BLUE}[4/4] Mengatur Layanan Latar Belakang (Auto-Start)...${NC}\n"
 
 if [ -d "/etc/init.d" ]; then
@@ -277,6 +280,6 @@ fi
 printf "\n${CYAN}====================================================${NC}\n"
 printf "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}\n"
 printf "${CYAN}====================================================${NC}\n"
-printf "Status Bot : ${YELLOW}Berjalan di latar belakang (Background Process)${NC}\n"
-printf "Cek pesan Telegram Anda untuk konfirmasi pesan aktif.\n"
+printf "Status Bot      : ${YELLOW}Berjalan di latar belakang${NC}\n"
+printf "Cara Uninstall  : Ketik ${RED}unbotnotif${NC} di terminal\n"
 printf "${CYAN}====================================================${NC}\n\n"
