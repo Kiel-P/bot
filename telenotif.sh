@@ -8,6 +8,29 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Fungsi Progress Bar dan Persentase
+show_progress() {
+    local percent=$1
+    local text=$2
+    local width=20
+    local filled=$(( percent * width / 100 ))
+    local empty=$(( width - filled ))
+    
+    local bar=""
+    local i=0
+    while [ $i -lt $filled ]; do
+        bar="${bar}#"
+        i=$((i + 1))
+    done
+    i=0
+    while [ $i -lt $empty ]; do
+        bar="${bar}-"
+        i=$((i + 1))
+    done
+    
+    printf "\r    ${YELLOW}[%-20s] %3d%% - %s${NC}" "$bar" "$percent" "$text"
+}
+
 clear
 
 # Banner Pembukaan
@@ -17,22 +40,44 @@ printf "${CYAN}====================================================${NC}\n"
 printf "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}\n"
 printf "${CYAN}====================================================${NC}\n\n"
 
-# 1. Pengecekan & Instalasi Dependensi
+# 1. Pengecekan & Instalasi Dependensi dengan Persentase
 printf "${BLUE}[1/4] Memeriksa & Menginstall Modul Pendukung...${NC}\n"
 
+show_progress 0 "Menyiapkan sistem..."
+
 if command -v opkg >/dev/null 2>&1; then
+    show_progress 10 "Memperbarui daftar paket (opkg)..."
     opkg update >/dev/null 2>&1
-    for pkg in curl ip-full iw bash; do
-        if ! opkg list-installed | grep -q "^$pkg "; then
-            opkg install "$pkg" >/dev/null 2>&1
-        fi
-    done
+    
+    show_progress 30 "Memeriksa modul curl..."
+    if ! opkg list-installed | grep -q "^curl "; then
+        opkg install curl >/dev/null 2>&1
+    fi
+    
+    show_progress 50 "Memeriksa modul ip-full..."
+    if ! opkg list-installed | grep -q "^ip-full "; then
+        opkg install ip-full >/dev/null 2>&1
+    fi
+    
+    show_progress 70 "Memeriksa modul iw..."
+    if ! opkg list-installed | grep -q "^iw "; then
+        opkg install iw >/dev/null 2>&1
+    fi
+    
+    show_progress 90 "Memeriksa modul bash..."
+    if ! opkg list-installed | grep -q "^bash "; then
+        opkg install bash >/dev/null 2>&1
+    fi
 elif command -v apt-get >/dev/null 2>&1; then
+    show_progress 20 "Memperbarui daftar paket (apt)..."
     apt-get update -y >/dev/null 2>&1
+    
+    show_progress 60 "Memasang modul curl, iproute2, iw..."
     apt-get install -y curl iproute2 iw >/dev/null 2>&1
 fi
 
-printf "${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
+show_progress 100 "Selesai memasang semua modul!"
+printf "\n${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
 
 # 2. Input Konfigurasi dari Pengguna
 printf "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}\n"
