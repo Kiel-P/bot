@@ -183,7 +183,13 @@ is_device_online() {
     return 1
 }
 
-send_telegram "🤖 <b>Sistem Monitor Aktif!</b>\nRouter <b>${ROUTER_NAME}</b> siap memantau jaringan."
+# Kirim Pesan Selamat Datang (Format Multi-line Asli)
+START_MSG="🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
+Sistem siap memantau jaringan <b>${ROUTER_NAME}</b>.
+===========================
+                 By. K I H E O"
+
+send_telegram "$START_MSG"
 
 while true; do
     > "$CURRENT_FILE"
@@ -298,7 +304,7 @@ chmod +x /usr/bin/unbotnotif
 printf "${GREEN}✔ File bot dibuat di /usr/bin/telenotif${NC}\n"
 printf "${GREEN}✔ File uninstall dibuat di /usr/bin/unbotnotif${NC}\n\n"
 
-# 5. Membuat Service Auto-start
+# 5. Membuat Service Auto-start & Eksekusi Langsung
 printf "${BLUE}[4/4] Mengatur Layanan Latar Belakang (Auto-Start)...${NC}\n"
 
 killall telenotif 2>/dev/null
@@ -323,9 +329,11 @@ EOF
 chmod +x /etc/init.d/telenotif
 /etc/init.d/telenotif enable 2>/dev/null
 /etc/init.d/telenotif start 2>/dev/null
-else
-    nohup /usr/bin/telenotif >/dev/null 2>&1 &
 fi
+
+# Fallback & Trigger: Eksekusi langsung agar pesan aktif pasti terkirim saat itu juga
+killall telenotif 2>/dev/null
+/usr/bin/telenotif >/dev/null 2>&1 &
 
 printf "\n${CYAN}====================================================${NC}\n"
 printf "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}\n"
