@@ -47,11 +47,11 @@ while [ -z "$USER_CHAT_ID" ]; do
     [ -z "$USER_CHAT_ID" ] && printf "${RED}Chat ID tidak boleh kosong!${NC}\n"
 done
 
-printf "Masukkan Nama Router [Default: VOUCHER] : "
+printf "Masukkan Nama Router [Default: KIEL] : "
 read USER_ROUTER_NAME
-[ -z "$USER_ROUTER_NAME" ] && ROUTER_NAME="VOUCHER" || ROUTER_NAME="$USER_ROUTER_NAME"
+[ -z "$USER_ROUTER_NAME" ] && ROUTER_NAME="KIEL" || ROUTER_NAME="$USER_ROUTER_NAME"
 
-printf "Masukkan Interface Cadangan (Bukan Voucher) [Default: br-lan] : "
+printf "Masukkan Interface Cadangan [Default: br-lan] : "
 read USER_IFACE
 [ -z "$USER_IFACE" ] && FALLBACK_IFACE="br-lan" || FALLBACK_IFACE="$USER_IFACE"
 
@@ -72,6 +72,7 @@ INSTALL_TIME="CONF_TIME"
 
 STATE_FILE="/tmp/telenotif_state.txt"
 CURRENT_FILE="/tmp/telenotif_current.txt"
+CHILLI_TEMP="/tmp/chilli_raw.txt"
 ALIAS_FILE="/etc/config/host_alias.conf"
 
 touch "$STATE_FILE"
@@ -104,36 +105,40 @@ while true; do
     # ==========================================
     # MODE 1: ENGINE CHILLI / RADMON V2
     # ==========================================
-    if command -v chilli_query >/dev/null 2>&1 && chilli_query list >/dev/null 2>&1; then
+    if command -v chilli_query >/dev/null 2>&1; then
         
-        chilli_query list 2>/dev/null | while read -r mac ip status session_id remaining username _ ; do
+        # Simpan raw data untuk menghindari broken pipe saat parsing
+        chilli_query list > "$CHILLI_TEMP" 2>/dev/null
+        
+        while read -r mac ip status session_id remaining username _ ; do
             [ -z "$mac" ] && continue
             mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]' | tr -d '\r')
             ip=$(echo "$ip" | tr -d '\r')
             status=$(echo "$status" | tr -d '\r')
             [ -z "$username" ] || [ "$username" = "-" ] && username="Pengguna Voucher"
             
-            # Catat perangkat yang aktif di database sementara
+            # Tulis SEMUA data terkini perangkat (pass maupun dnat)
             echo "$mac|$ip|$status|$username" >> "$CURRENT_FILE"
 
-            # LOGIKA TERHUBUNG (Hanya jika status 'pass')
+            # Jika perangkat status PASS (Sudah login/aktif)
             if [ "$status" = "pass" ]; then
                 if ! grep -q -i "^$mac|" "$STATE_FILE"; then
+                    # Jika MAC tidak ada di state file, tambahkan dan kirim notif
                     echo "$mac|$ip|$status|$username" >> "$STATE_FILE"
-                    MSG="🚀 <b>Perangkat Terhubung (Hotspot)!</b>
+                    MSG="🚀 <b>Perangkat Terhubung!</b>
 📡 Router: ${ROUTER_NAME}
 👤 User/Host: ${username}
 🌐 IP: ${ip}
 🏷️ MAC: ${mac}
-📶 Jalur: RadmonV2/Chilli
+📶 Jalur: Chilli (Terhubung/Login)
 ===========================
                  By. K I H E O"
                     send_telegram "$MSG"
                 fi
             fi
-        done
+        done < "$CHILLI_TEMP"
 
-        # LOGIKA TERPUTUS / LOGOUT (Cek dari state yang sebelumnya pass)
+        # Cek Perangkat yang Terputus (berdasarkan file State yg menyimpan perangkat 'pass' sebelumnya)
         if [ -f "$STATE_FILE" ]; then
             TEMP_STATE="/tmp/telenotif_temp.txt"
             > "$TEMP_STATE"
@@ -141,14 +146,14 @@ while true; do
             while IFS='|' read -r mac ip old_status username; do
                 [ -z "$mac" ] && continue
                 
-                # Cek status barunya
+                # Cek status barunya di current file
                 current_status=$(grep -i "^$mac|" "$CURRENT_FILE" | cut -d'|' -f3)
                 
-                # Jika tidak ada (hilang) atau menjadi dnat (putus/logout)
+                # Jika perangkat hilang total ATAU berubah menjadi dnat (putus/logout)
                 if [ -z "$current_status" ] || [ "$current_status" = "dnat" ]; then
-                    [ -z "$current_status" ] && display_stat="Offline/Keluar Jaringan" || display_stat="DNAT (Logout/Belum Login)"
+                    [ -z "$current_status" ] && display_stat="Offline/Keluar Jaringan" || display_stat="DNAT (Terputus/Logout)"
                     
-                    MSG="🔻 <b>Perangkat Terputus (Hotspot)!</b>
+                    MSG="🔻 <b>Perangkat Terputus!</b>
 📡 Router: ${ROUTER_NAME}
 👤 User/Host: ${username}
 🌐 IP: ${ip}
@@ -158,6 +163,7 @@ while true; do
               By. K I H E O"
                     send_telegram "$MSG"
                 else
+                    # Jika masih pass, pertahankan di state
                     echo "$mac|$ip|$old_status|$username" >> "$TEMP_STATE"
                 fi
             done < "$STATE_FILE"
@@ -177,7 +183,6 @@ while true; do
             ip=$(echo "$ip" | tr -d '\r')
             [ -z "$mac" ] && continue
             
-            # Cek koneksi aktif
             is_online=0
             if ip neigh show | grep -i "$mac" | grep -qE "REACHABLE|DELAY"; then is_online=1
             elif ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then is_online=1
@@ -192,7 +197,7 @@ while true; do
 
                 if ! grep -q -i "^$mac|" "$STATE_FILE"; then
                     echo "$mac|$ip|pass|$DISPLAY_NAME" >> "$STATE_FILE"
-                    MSG="🚀 <b>Perangkat Terhubung (LAN/WIFI)!</b>
+                    MSG="🚀 <b>Perangkat Terhubung!</b>
 📡 Router: ${ROUTER_NAME}
 📱 Host: ${DISPLAY_NAME}
 🌐 IP: ${ip}
@@ -205,14 +210,12 @@ while true; do
             fi
         done
 
-        # Logika Terputus untuk standar interface
         if [ -f "$STATE_FILE" ]; then
             TEMP_STATE="/tmp/telenotif_temp.txt"
             > "$TEMP_STATE"
             while IFS='|' read -r mac ip status display_name; do
                 [ -z "$mac" ] && continue
                 if ! grep -q -i "^$mac|" "$CURRENT_FILE"; then
-                    # Tes ping terakhir sebelum diklaim offline
                     if ! ping -c 1 -W 1 "$ip" >/dev/null 2>&1 && ! (command -v arping >/dev/null 2>&1 && arping -c 1 -w 1 -I "$FALLBACK_IFACE" "$ip" >/dev/null 2>&1); then
                         MSG="🔻 <b>Perangkat Terputus!</b>
 📡 Router: ${ROUTER_NAME}
@@ -255,7 +258,7 @@ if [ -f /etc/init.d/telenotif ]; then
     rm -f /etc/init.d/telenotif
 fi
 killall telenotif 2>/dev/null
-rm -f /usr/bin/telenotif /tmp/telenotif_*.txt /tmp/active_arp.txt
+rm -f /usr/bin/telenotif /tmp/telenotif_*.txt /tmp/chilli_raw.txt /tmp/active_arp.txt
 echo -e "\033[0;32m✔ Bot berhasil dihapus total!\033[0m"
 rm -f /usr/bin/unbotnotif
 EOF
