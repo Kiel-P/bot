@@ -8,29 +8,73 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Fungsi Animasi Progress Real-Time
+run_with_progress() {
+    local start=$1
+    local end=$2
+    local text=$3
+    shift 3
+    local cmd="$@"
+
+    eval "$cmd" >/dev/null 2>&1 &
+    local pid=$!
+    local current=$start
+    local width=25
+
+    while kill -0 $pid 2>/dev/null; do
+        local filled=$(( current * width / 100 ))
+        local empty=$(( width - filled ))
+        
+        local bar=""
+        local i=0; while [ $i -lt $filled ]; do bar="${bar}#"; i=$((i + 1)); done
+        local i=0; while [ $i -lt $empty ]; do bar="${bar}-"; i=$((i + 1)); done
+        
+        printf "\r    ${YELLOW}[%s] %3d%% - %-35s${NC}" "$bar" "$current" "$text"
+        
+        if [ $current -lt $((end - 1)) ]; then
+            current=$((current + 1))
+        fi
+        sleep 0.15
+    done
+    wait $pid
+
+    while [ $current -le $end ]; do
+        local filled=$(( current * width / 100 ))
+        local empty=$(( width - filled ))
+        
+        local bar=""
+        local i=0; while [ $i -lt $filled ]; do bar="${bar}#"; i=$((i + 1)); done
+        local i=0; while [ $i -lt $empty ]; do bar="${bar}-"; i=$((i + 1)); done
+        
+        printf "\r    ${YELLOW}[%s] %3d%% - %-35s${NC}" "$bar" "$current" "$text"
+        current=$((current + 1))
+        sleep 0.02
+    done
+}
+
 clear
 
 # Banner Pembukaan
 printf "${CYAN}====================================================${NC}\n"
-printf "${YELLOW}    NOTIFIKASI TELEGRAM AUTO-ENGINE BY.KIHEO      ${NC}\n"
+printf "${YELLOW}       NOTIFIKASI TELEGRAM BY.KIHEO               ${NC}\n"
 printf "${CYAN}====================================================${NC}\n"
-printf "${GREEN} Memulai Proses Pemasangan Bot (Chilli/LAN)...      ${NC}\n"
+printf "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}\n"
 printf "${CYAN}====================================================${NC}\n\n"
 
 # 1. Pengecekan Dependensi (Curl & Arping)
-printf "${BLUE}[1/3] Memeriksa Modul Pendukung...${NC}\n"
+printf "${BLUE}[1/4] Memeriksa Modul Pendukung...${NC}\n"
 if command -v opkg >/dev/null 2>&1; then
-    opkg update >/dev/null 2>&1
-    opkg list-installed | grep -q '^curl ' || opkg install curl >/dev/null 2>&1
-    opkg list-installed | grep -q '^arping ' || opkg install arping >/dev/null 2>&1
+    run_with_progress 0 25 "Update repository..." "opkg update"
+    run_with_progress 25 50 "Memeriksa modul curl..." "opkg list-installed | grep -q '^curl ' || opkg install curl"
+    run_with_progress 50 100 "Memeriksa modul arping..." "opkg list-installed | grep -q '^arping ' || opkg install arping"
 elif command -v apt-get >/dev/null 2>&1; then
-    apt-get update -y >/dev/null 2>&1
-    apt-get install -y curl iputils-arping >/dev/null 2>&1
+    run_with_progress 0 50 "Update repository..." "apt-get update -y"
+    run_with_progress 50 100 "Memasang modul penting..." "apt-get install -y curl iputils-arping"
 fi
-printf "${GREEN}✔ Modul pendukung siap!${NC}\n\n"
+printf "\n\n${GREEN}✔ Modul pendukung siap!${NC}\n\n"
 
 # 2. Input Konfigurasi
-printf "${BLUE}[2/3] Konfigurasi Bot Telegram${NC}\n"
+printf "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}\n"
 printf "${YELLOW}----------------------------------------------------${NC}\n"
 
 USER_TOKEN=""
@@ -59,7 +103,7 @@ INSTALL_TIME=$(date +"%d-%m-%Y %H:%M:%S")
 printf "${GREEN}✔ Konfigurasi berhasil disimpan!${NC}\n\n"
 
 # 3. Membuat Script Utama (/usr/bin/telenotif)
-printf "${BLUE}[3/3] Membuat File Script Utama (Auto-Engine)...${NC}\n"
+printf "${BLUE}[3/4] Membuat File Script Utama...${NC}\n"
 
 cat << 'EOF' > /usr/bin/telenotif
 #!/bin/sh
@@ -92,6 +136,11 @@ get_device_name() {
     else echo "Perangkat Tanpa Nama"; fi
 }
 
+# Fungsi format MAC dari XX-XX-XX-XX-XX-XX ke XX:XX:XX:XX:XX:XX
+format_mac() {
+    echo "$1" | tr '-' ':' | tr '[:upper:]' '[:lower:]'
+}
+
 send_telegram "🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
 Sistem siap memantau jaringan <b>${ROUTER_NAME}</b>
 Mode Deteksi: Auto-Switch (Chilli / LAN)
@@ -110,9 +159,11 @@ while true; do
         # Simpan raw data untuk menghindari broken pipe saat parsing
         chilli_query list > "$CHILLI_TEMP" 2>/dev/null
         
-        while read -r mac ip status session_id remaining username _ ; do
-            [ -z "$mac" ] && continue
-            mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+        while read -r mac_raw ip status session_id remaining username _ ; do
+            [ -z "$mac_raw" ] && continue
+            
+            # Format ulang MAC address dengan titik dua (:)
+            mac=$(format_mac "$mac_raw")
             ip=$(echo "$ip" | tr -d '\r')
             status=$(echo "$status" | tr -d '\r')
             [ -z "$username" ] || [ "$username" = "-" ] && username="Pengguna Voucher"
@@ -265,6 +316,7 @@ EOF
 chmod +x /usr/bin/unbotnotif
 
 # 5. Konfigurasi Autostart dan Menjalankan Bot
+printf "${BLUE}[4/4] Mengatur Layanan Latar Belakang (Auto-Start)...${NC}\n"
 if [ -d "/etc/init.d" ]; then
 cat << 'EOF' > /etc/init.d/telenotif
 #!/bin/sh /etc/rc.common
@@ -291,5 +343,5 @@ printf "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}\n"
 printf "${CYAN}====================================================${NC}\n"
 printf "Status Bot      : ${YELLOW}Berjalan Otomatis${NC}\n"
 printf "Waktu Install   : ${YELLOW}${INSTALL_TIME}${NC}\n"
-printf "Cara Hentikan   : Ketik ${RED}unbotnotif${NC} di terminal\n"
+printf "Cara Uninstall  : Ketik ${RED}unbotnotif${NC} di terminal\n"
 printf "${CYAN}====================================================${NC}\n"
