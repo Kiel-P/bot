@@ -8,7 +8,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Fungsi Animasi Progress Real-Time yang Sangat Smooth (Pro Look)
+# Fungsi Animasi Progress Real-Time
 run_with_progress() {
     local start=$1
     local end=$2
@@ -61,7 +61,7 @@ printf "${CYAN}====================================================${NC}\n"
 printf "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}\n"
 printf "${CYAN}====================================================${NC}\n\n"
 
-# 1. Pengecekan & Instalasi Dependensi dengan Progress Smooth
+# 1. Pengecekan & Instalasi Dependensi
 printf "${BLUE}[1/4] Memeriksa & Menginstall Modul Pendukung...${NC}\n"
 
 if command -v opkg >/dev/null 2>&1; then
@@ -108,6 +108,14 @@ else
     ROUTER_NAME="$USER_ROUTER_NAME"
 fi
 
+printf "Masukkan Interface Jaringan [Default: br-lan] : "
+read USER_IFACE
+if [ -z "$USER_IFACE" ]; then
+    MONITOR_IFACE="br-lan"
+else
+    MONITOR_IFACE="$USER_IFACE"
+fi
+
 printf "${GREEN}✔ Konfigurasi berhasil disimpan!${NC}\n\n"
 
 # 3. Membuat Script Utama (/usr/bin/telenotif)
@@ -119,6 +127,7 @@ cat << 'EOF' > /usr/bin/telenotif
 TELEGRAM_TOKEN="CONF_TOKEN"
 CHAT_ID="CONF_CHAT_ID"
 ROUTER_NAME="CONF_ROUTER_NAME"
+MONITOR_IFACE="CONF_IFACE"
 
 LEASE_FILE="/tmp/dhcp.leases"
 STATE_FILE="/tmp/known_macs_v2.txt"
@@ -129,7 +138,6 @@ touch "$STATE_FILE"
 
 send_telegram() {
     local message="$1"
-    # Background process (&) agar bot tidak lag
     curl -k -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
         -d "chat_id=${CHAT_ID}" \
         --data-urlencode "text=${message}" \
@@ -141,9 +149,7 @@ get_device_name() {
     local hostname="$2"
     local alias_name=""
 
-    if [ -f "$ALIAS_FILE" ]; then
-        alias_name=$(grep -i "^$mac" "$ALIAS_FILE" | awk '{print $2}')
-    fi
+    [ -f "$ALIAS_FILE" ] && alias_name=$(grep -i "^$mac" "$ALIAS_FILE" | awk '{print $2}')
 
     if [ -n "$alias_name" ]; then
         echo "$alias_name"
@@ -158,64 +164,49 @@ is_device_online() {
     local ip="$1"
     local mac="$2"
 
-    # 1. Coba ARPING (Paling real-time & akurat)
+    if ip neigh show | grep -i "$mac" | grep -qE "REACHABLE|DELAY"; then return 0; fi
+    if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then return 0; fi
     if command -v arping >/dev/null 2>&1; then
-        if arping -c 1 -w 1 -I br-lan "$ip" >/dev/null 2>&1; then
-            return 0
-        fi
+        if arping -c 1 -w 1 -I "$MONITOR_IFACE" "$ip" >/dev/null 2>&1; then return 0; fi
     fi
-
-    # 2. Fallback ICMP Ping biasa
-    if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then
-        return 0
-    fi
-
-    # 3. Cek station Wi-Fi STB
-    if echo "$STB_WIFI_CLIENTS" | grep -q -i "$mac"; then
-        return 0
-    fi
-
-    # 4. Fallback ARP Table
-    if ip neigh show | grep -i "$mac" | grep -qE "REACHABLE|DELAY"; then
-        return 0
-    fi
-
+    
     return 1
 }
 
-# Kirim Pesan Selamat Datang (Format Multi-line Asli)
-START_MSG="🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
-Sistem siap memantau jaringan <b>${ROUTER_NAME}</b>.
+send_telegram "🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
+Sistem siap memantau jaringan <b>${ROUTER_NAME}</b> via <b>${MONITOR_IFACE}</b>.
 ===========================
                  By. K I H E O"
 
-send_telegram "$START_MSG"
-
 while true; do
     > "$CURRENT_FILE"
-    STB_WIFI_CLIENTS=$(iw dev 2>/dev/null | grep -i "station" | awk '{print $2}')
+    > /tmp/active_arp.txt
+    
+    ip neigh show | grep -E "REACHABLE|DELAY|STALE" | awk '{print $5"|"$1}' | grep ":" >> /tmp/active_arp.txt
+    [ -f "$LEASE_FILE" ] && awk '{print $2"|"$3}' "$LEASE_FILE" 2>/dev/null >> /tmp/active_arp.txt
 
-    if [ -f "$LEASE_FILE" ]; then
-        while read -r timestamp mac ip hostname client_id; do
-            # Pembersihan format mencegah error carriage return
-            mac=$(echo "$mac" | tr -d '\r' | tr '[:upper:]' '[:lower:]')
-            ip=$(echo "$ip" | tr -d '\r')
-            [ -z "$mac" ] && continue
+    sort -u /tmp/active_arp.txt | while IFS='|' read -r mac ip; do
+        mac=$(echo "$mac" | tr -d '\r' | tr '[:upper:]' '[:lower:]')
+        ip=$(echo "$ip" | tr -d '\r')
+        [ -z "$mac" ] && continue
+        
+        if is_device_online "$ip" "$mac"; then
+            hostname=$(awk -v m="$mac" '$2==m {print $4}' "$LEASE_FILE" 2>/dev/null)
+            DISPLAY_NAME=$(get_device_name "$mac" "$hostname")
             
-            if is_device_online "$ip" "$mac"; then
-                DISPLAY_NAME=$(get_device_name "$mac" "$hostname")
-                echo "$mac|$DISPLAY_NAME|$ip" >> "$CURRENT_FILE"
+            echo "$mac|$DISPLAY_NAME|$ip" >> "$CURRENT_FILE"
 
-                if ! grep -q -i "^$mac|" "$STATE_FILE"; then
-                    echo "$mac|$DISPLAY_NAME|$ip" >> "$STATE_FILE"
-                    
-                    if echo "$STB_WIFI_CLIENTS" | grep -q -i "$mac"; then
+            if ! grep -q -i "^$mac|" "$STATE_FILE"; then
+                echo "$mac|$DISPLAY_NAME|$ip" >> "$STATE_FILE"
+                
+                CONN_TYPE="🔌 Terhubung ke Jaringan"
+                if command -v iwinfo >/dev/null 2>&1; then
+                    if iwinfo wlan0 assoclist 2>/dev/null | grep -q -i "$mac"; then
                         CONN_TYPE="📶 STB Wi-Fi"
-                    else
-                        CONN_TYPE="🔌 Kabel LAN (${ROUTER_NAME})"
                     fi
+                fi
 
-                    MSG="🚀 <b>Perangkat Terhubung!</b>
+                MSG="🚀 <b>Perangkat Terhubung!</b>
 📡 Router: ${ROUTER_NAME}
 📱 Host: ${DISPLAY_NAME}
 🌐 IP: ${ip}
@@ -223,11 +214,10 @@ while true; do
 📶 Jalur: ${CONN_TYPE}
 ===========================
                  By. K I H E O"
-                    send_telegram "$MSG"
-                fi
+                send_telegram "$MSG"
             fi
-        done < "$LEASE_FILE"
-    fi
+        fi
+    done
 
     if [ -f "$STATE_FILE" ]; then
         TEMP_STATE="/tmp/temp_state_v2.txt"
@@ -235,12 +225,9 @@ while true; do
 
         while IFS='|' read -r mac display_name ip; do
             mac=$(echo "$mac" | tr -d '\r')
-            display_name=$(echo "$display_name" | tr -d '\r')
-            ip=$(echo "$ip" | tr -d '\r')
             [ -z "$mac" ] && continue
             
             if ! grep -q -i "^$mac|" "$CURRENT_FILE"; then
-                # Double-Check (Anti-Flapping)
                 if ! is_device_online "$ip" "$mac"; then
                     MSG="🔻 <b>Perangkat Terputus!</b>
 📡 Router: ${ROUTER_NAME}
@@ -257,11 +244,9 @@ while true; do
                 echo "$mac|$display_name|$ip" >> "$TEMP_STATE"
             fi
         done < "$STATE_FILE"
-
         mv "$TEMP_STATE" "$STATE_FILE"
     fi
-
-    sleep 3
+    sleep 5
 done
 EOF
 
@@ -269,6 +254,7 @@ EOF
 sed -i "s|CONF_TOKEN|${USER_TOKEN}|g" /usr/bin/telenotif
 sed -i "s|CONF_CHAT_ID|${USER_CHAT_ID}|g" /usr/bin/telenotif
 sed -i "s|CONF_ROUTER_NAME|${ROUTER_NAME}|g" /usr/bin/telenotif
+sed -i "s|CONF_IFACE|${MONITOR_IFACE}|g" /usr/bin/telenotif
 
 chmod +x /usr/bin/telenotif
 
@@ -292,7 +278,7 @@ fi
 
 killall telenotif 2>/dev/null
 rm -f /usr/bin/telenotif
-rm -f /tmp/known_macs*.txt /tmp/current_active*.txt /tmp/temp_state*.txt
+rm -f /tmp/known_macs*.txt /tmp/current_active*.txt /tmp/temp_state*.txt /tmp/active_arp.txt
 
 printf "${GREEN}✔ Bot notifikasi telegram berhasil dihapus total!${NC}\n"
 printf "${CYAN}====================================================${NC}\n"
@@ -331,7 +317,6 @@ chmod +x /etc/init.d/telenotif
 /etc/init.d/telenotif start 2>/dev/null
 fi
 
-# Fallback & Trigger: Eksekusi langsung agar pesan aktif pasti terkirim saat itu juga
 killall telenotif 2>/dev/null
 /usr/bin/telenotif >/dev/null 2>&1 &
 
@@ -339,5 +324,6 @@ printf "\n${CYAN}====================================================${NC}\n"
 printf "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}\n"
 printf "${CYAN}====================================================${NC}\n"
 printf "Status Bot      : ${YELLOW}Berjalan otomatis di latar belakang${NC}\n"
+printf "Interface       : ${YELLOW}${MONITOR_IFACE}${NC}\n"
 printf "Cara Hentikan   : Ketik ${RED}unbotnotif${NC} di terminal\n"
 printf "${CYAN}====================================================${NC}\n"
