@@ -8,127 +8,58 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Fungsi Animasi Progress Real-Time
-run_with_progress() {
-    local start=$1
-    local end=$2
-    local text=$3
-    shift 3
-    local cmd="$@"
-
-    eval "$cmd" >/dev/null 2>&1 &
-    local pid=$!
-    local current=$start
-    local width=25
-
-    while kill -0 $pid 2>/dev/null; do
-        local filled=$(( current * width / 100 ))
-        local empty=$(( width - filled ))
-        
-        local bar=""
-        local i=0; while [ $i -lt $filled ]; do bar="${bar}#"; i=$((i + 1)); done
-        local i=0; while [ $i -lt $empty ]; do bar="${bar}-"; i=$((i + 1)); done
-        
-        printf "\r    ${YELLOW}[%s] %3d%% - %-35s${NC}" "$bar" "$current" "$text"
-        
-        if [ $current -lt $((end - 1)) ]; then
-            current=$((current + 1))
-        fi
-        sleep 0.15
-    done
-    wait $pid
-
-    while [ $current -le $end ]; do
-        local filled=$(( current * width / 100 ))
-        local empty=$(( width - filled ))
-        
-        local bar=""
-        local i=0; while [ $i -lt $filled ]; do bar="${bar}#"; i=$((i + 1)); done
-        local i=0; while [ $i -lt $empty ]; do bar="${bar}-"; i=$((i + 1)); done
-        
-        printf "\r    ${YELLOW}[%s] %3d%% - %-35s${NC}" "$bar" "$current" "$text"
-        current=$((current + 1))
-        sleep 0.02
-    done
-}
-
 clear
 
 # Banner Pembukaan
 printf "${CYAN}====================================================${NC}\n"
-printf "${YELLOW}       NOTIFIKASI TELEGRAM BY.KIHEO               ${NC}\n"
+printf "${YELLOW}    NOTIFIKASI TELEGRAM AUTO-ENGINE BY.KIHEO      ${NC}\n"
 printf "${CYAN}====================================================${NC}\n"
-printf "${GREEN} Memulai Proses Pemasangan Bot Notifikasi STB...    ${NC}\n"
+printf "${GREEN} Memulai Proses Pemasangan Bot (Chilli/LAN)...      ${NC}\n"
 printf "${CYAN}====================================================${NC}\n\n"
 
-# 1. Pengecekan & Instalasi Dependensi
-printf "${BLUE}[1/4] Memeriksa & Menginstall Modul Pendukung...${NC}\n"
-
+# 1. Pengecekan Dependensi (Curl & Arping)
+printf "${BLUE}[1/3] Memeriksa Modul Pendukung...${NC}\n"
 if command -v opkg >/dev/null 2>&1; then
-    run_with_progress 0 15 "Update repository (opkg)..." "opkg update"
-    run_with_progress 15 30 "Memeriksa modul curl..." "opkg list-installed | grep -q '^curl ' || opkg install curl"
-    run_with_progress 30 50 "Memeriksa modul ip-full..." "opkg list-installed | grep -q '^ip-full ' || opkg install ip-full"
-    run_with_progress 50 65 "Memeriksa modul iw..." "opkg list-installed | grep -q '^iw ' || opkg install iw"
-    run_with_progress 65 80 "Memeriksa modul bash..." "opkg list-installed | grep -q '^bash ' || opkg install bash"
-    run_with_progress 80 100 "Memeriksa modul arping..." "opkg list-installed | grep -q '^arping ' || opkg install arping"
+    opkg update >/dev/null 2>&1
+    opkg list-installed | grep -q '^curl ' || opkg install curl >/dev/null 2>&1
+    opkg list-installed | grep -q '^arping ' || opkg install arping >/dev/null 2>&1
 elif command -v apt-get >/dev/null 2>&1; then
-    run_with_progress 0 40 "Update repository (apt)..." "apt-get update -y"
-    run_with_progress 40 100 "Memasang modul penting..." "apt-get install -y curl iproute2 iw iputils-arping"
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y curl iputils-arping >/dev/null 2>&1
 fi
+printf "${GREEN}✔ Modul pendukung siap!${NC}\n\n"
 
-printf "\n\n${GREEN}✔ Semua modul pendukung berhasil dipasang!${NC}\n\n"
-
-# 2. Input Konfigurasi dari Pengguna
-printf "${BLUE}[2/4] Konfigurasi Bot Telegram${NC}\n"
+# 2. Input Konfigurasi
+printf "${BLUE}[2/3] Konfigurasi Bot Telegram${NC}\n"
 printf "${YELLOW}----------------------------------------------------${NC}\n"
 
 USER_TOKEN=""
 while [ -z "$USER_TOKEN" ]; do
     printf "Masukkan Token Bot Telegram : "
     read USER_TOKEN
-    if [ -z "$USER_TOKEN" ]; then
-        printf "${RED}Token Bot tidak boleh kosong!${NC}\n"
-    fi
+    [ -z "$USER_TOKEN" ] && printf "${RED}Token tidak boleh kosong!${NC}\n"
 done
 
 USER_CHAT_ID=""
 while [ -z "$USER_CHAT_ID" ]; do
     printf "Masukkan Chat ID Telegram   : "
     read USER_CHAT_ID
-    if [ -z "$USER_CHAT_ID" ]; then
-        printf "${RED}Chat ID tidak boleh kosong!${NC}\n"
-    fi
+    [ -z "$USER_CHAT_ID" ] && printf "${RED}Chat ID tidak boleh kosong!${NC}\n"
 done
 
-printf "Masukkan Nama Router [Default: KIEL] : "
+printf "Masukkan Nama Router [Default: VOUCHER] : "
 read USER_ROUTER_NAME
-if [ -z "$USER_ROUTER_NAME" ]; then
-    ROUTER_NAME="KIEL"
-else
-    ROUTER_NAME="$USER_ROUTER_NAME"
-fi
+[ -z "$USER_ROUTER_NAME" ] && ROUTER_NAME="VOUCHER" || ROUTER_NAME="$USER_ROUTER_NAME"
 
-# Input Dua Interface
-printf "Masukkan Interface Utama (ke-1) [Default: br-lan] : "
-read USER_IFACE1
-if [ -z "$USER_IFACE1" ]; then
-    IFACE_1="br-lan"
-else
-    IFACE_1="$USER_IFACE1"
-fi
+printf "Masukkan Interface Cadangan (Bukan Voucher) [Default: br-lan] : "
+read USER_IFACE
+[ -z "$USER_IFACE" ] && FALLBACK_IFACE="br-lan" || FALLBACK_IFACE="$USER_IFACE"
 
-printf "Masukkan Interface Cadangan (ke-2) [Default: tun0] : "
-read USER_IFACE2
-if [ -z "$USER_IFACE2" ]; then
-    IFACE_2="tun0"
-else
-    IFACE_2="$USER_IFACE2"
-fi
-
+INSTALL_TIME=$(date +"%d-%m-%Y %H:%M:%S")
 printf "${GREEN}✔ Konfigurasi berhasil disimpan!${NC}\n\n"
 
 # 3. Membuat Script Utama (/usr/bin/telenotif)
-printf "${BLUE}[3/4] Membuat File Script Utama...${NC}\n"
+printf "${BLUE}[3/3] Membuat File Script Utama (Auto-Engine)...${NC}\n"
 
 cat << 'EOF' > /usr/bin/telenotif
 #!/bin/sh
@@ -136,202 +67,214 @@ cat << 'EOF' > /usr/bin/telenotif
 TELEGRAM_TOKEN="CONF_TOKEN"
 CHAT_ID="CONF_CHAT_ID"
 ROUTER_NAME="CONF_ROUTER_NAME"
-IFACE_1="CONF_IFACE1"
-IFACE_2="CONF_IFACE2"
+FALLBACK_IFACE="CONF_IFACE"
+INSTALL_TIME="CONF_TIME"
 
-LEASE_FILE="/tmp/dhcp.leases"
-STATE_FILE="/tmp/known_macs_v2.txt"
-CURRENT_FILE="/tmp/current_active_v2.txt"
+STATE_FILE="/tmp/telenotif_state.txt"
+CURRENT_FILE="/tmp/telenotif_current.txt"
 ALIAS_FILE="/etc/config/host_alias.conf"
 
 touch "$STATE_FILE"
 
 send_telegram() {
-    local message="$1"
     curl -k -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
         -d "chat_id=${CHAT_ID}" \
-        --data-urlencode "text=${message}" \
+        --data-urlencode "text=$1" \
         -d "parse_mode=HTML" > /dev/null 2>&1 &
 }
 
 get_device_name() {
-    local mac="$1"
-    local hostname="$2"
-    local alias_name=""
-
+    local mac="$1" hostname="$2" alias_name=""
     [ -f "$ALIAS_FILE" ] && alias_name=$(grep -i "^$mac" "$ALIAS_FILE" | awk '{print $2}')
-
-    if [ -n "$alias_name" ]; then
-        echo "$alias_name"
-    elif [ -n "$hostname" ] && [ "$hostname" != "*" ]; then
-        echo "$hostname"
-    else
-        echo "Perangkat Tanpa Nama"
-    fi
-}
-
-is_device_online() {
-    local ip="$1"
-    local mac="$2"
-
-    if ip neigh show | grep -i "$mac" | grep -qE "REACHABLE|DELAY"; then return 0; fi
-    if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then return 0; fi
-    
-    # Cek menggunakan arping ke dua interface yang ditentukan pengguna
-    if command -v arping >/dev/null 2>&1; then
-        if [ -n "$IFACE_1" ] && [ "$IFACE_1" != "none" ]; then
-            if arping -c 1 -w 1 -I "$IFACE_1" "$ip" >/dev/null 2>&1; then return 0; fi
-        fi
-        
-        if [ -n "$IFACE_2" ] && [ "$IFACE_2" != "none" ]; then
-            if arping -c 1 -w 1 -I "$IFACE_2" "$ip" >/dev/null 2>&1; then return 0; fi
-        fi
-    fi
-    
-    return 1
+    if [ -n "$alias_name" ]; then echo "$alias_name"
+    elif [ -n "$hostname" ] && [ "$hostname" != "*" ]; then echo "$hostname"
+    else echo "Perangkat Tanpa Nama"; fi
 }
 
 send_telegram "🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
-Sistem memantau <b>${ROUTER_NAME}</b>
-Jalur Aktif: <b>${IFACE_1}</b> & <b>${IFACE_2}</b>.
+Sistem siap memantau jaringan <b>${ROUTER_NAME}</b>
+Mode Deteksi: Auto-Switch (Chilli / LAN)
+⏱️ Diinstall pada: ${INSTALL_TIME}
 ===========================
                  By. K I H E O"
 
 while true; do
     > "$CURRENT_FILE"
-    > /tmp/active_arp.txt
     
-    ip neigh show | grep -E "REACHABLE|DELAY|STALE" | awk '{print $5"|"$1}' | grep ":" >> /tmp/active_arp.txt
-    [ -f "$LEASE_FILE" ] && awk '{print $2"|"$3}' "$LEASE_FILE" 2>/dev/null >> /tmp/active_arp.txt
-
-    sort -u /tmp/active_arp.txt | while IFS='|' read -r mac ip; do
-        mac=$(echo "$mac" | tr -d '\r' | tr '[:upper:]' '[:lower:]')
-        ip=$(echo "$ip" | tr -d '\r')
-        [ -z "$mac" ] && continue
+    # ==========================================
+    # MODE 1: ENGINE CHILLI / RADMON V2
+    # ==========================================
+    if command -v chilli_query >/dev/null 2>&1 && chilli_query list >/dev/null 2>&1; then
         
-        if is_device_online "$ip" "$mac"; then
-            hostname=$(awk -v m="$mac" '$2==m {print $4}' "$LEASE_FILE" 2>/dev/null)
-            DISPLAY_NAME=$(get_device_name "$mac" "$hostname")
+        chilli_query list 2>/dev/null | while read -r mac ip status session_id remaining username _ ; do
+            [ -z "$mac" ] && continue
+            mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+            ip=$(echo "$ip" | tr -d '\r')
+            status=$(echo "$status" | tr -d '\r')
+            [ -z "$username" ] || [ "$username" = "-" ] && username="Pengguna Voucher"
             
-            echo "$mac|$DISPLAY_NAME|$ip" >> "$CURRENT_FILE"
+            # Catat perangkat yang aktif di database sementara
+            echo "$mac|$ip|$status|$username" >> "$CURRENT_FILE"
 
-            if ! grep -q -i "^$mac|" "$STATE_FILE"; then
-                echo "$mac|$DISPLAY_NAME|$ip" >> "$STATE_FILE"
-                
-                CONN_TYPE="🔌 Terhubung ke Jaringan"
-                if command -v iwinfo >/dev/null 2>&1; then
-                    if iwinfo wlan0 assoclist 2>/dev/null | grep -q -i "$mac"; then
-                        CONN_TYPE="📶 STB Wi-Fi"
-                    fi
+            # LOGIKA TERHUBUNG (Hanya jika status 'pass')
+            if [ "$status" = "pass" ]; then
+                if ! grep -q -i "^$mac|" "$STATE_FILE"; then
+                    echo "$mac|$ip|$status|$username" >> "$STATE_FILE"
+                    MSG="🚀 <b>Perangkat Terhubung (Hotspot)!</b>
+📡 Router: ${ROUTER_NAME}
+👤 User/Host: ${username}
+🌐 IP: ${ip}
+🏷️ MAC: ${mac}
+📶 Jalur: RadmonV2/Chilli
+===========================
+                 By. K I H E O"
+                    send_telegram "$MSG"
                 fi
+            fi
+        done
 
-                MSG="🚀 <b>Perangkat Terhubung!</b>
+        # LOGIKA TERPUTUS / LOGOUT (Cek dari state yang sebelumnya pass)
+        if [ -f "$STATE_FILE" ]; then
+            TEMP_STATE="/tmp/telenotif_temp.txt"
+            > "$TEMP_STATE"
+            
+            while IFS='|' read -r mac ip old_status username; do
+                [ -z "$mac" ] && continue
+                
+                # Cek status barunya
+                current_status=$(grep -i "^$mac|" "$CURRENT_FILE" | cut -d'|' -f3)
+                
+                # Jika tidak ada (hilang) atau menjadi dnat (putus/logout)
+                if [ -z "$current_status" ] || [ "$current_status" = "dnat" ]; then
+                    [ -z "$current_status" ] && display_stat="Offline/Keluar Jaringan" || display_stat="DNAT (Logout/Belum Login)"
+                    
+                    MSG="🔻 <b>Perangkat Terputus (Hotspot)!</b>
+📡 Router: ${ROUTER_NAME}
+👤 User/Host: ${username}
+🌐 IP: ${ip}
+🏷️ MAC: ${mac}
+📊 Status: ${display_stat}
+========================
+              By. K I H E O"
+                    send_telegram "$MSG"
+                else
+                    echo "$mac|$ip|$old_status|$username" >> "$TEMP_STATE"
+                fi
+            done < "$STATE_FILE"
+            mv "$TEMP_STATE" "$STATE_FILE"
+        fi
+
+    # ==========================================
+    # MODE 2: ENGINE STANDAR (Fallback Interface)
+    # ==========================================
+    else
+        > /tmp/active_arp.txt
+        ip neigh show | grep -E "REACHABLE|DELAY" | awk '{print $5"|"$1}' | grep ":" >> /tmp/active_arp.txt
+        [ -f "/tmp/dhcp.leases" ] && awk '{print $2"|"$3}' /tmp/dhcp.leases 2>/dev/null >> /tmp/active_arp.txt
+
+        sort -u /tmp/active_arp.txt | while IFS='|' read -r mac ip; do
+            mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]' | tr -d '\r')
+            ip=$(echo "$ip" | tr -d '\r')
+            [ -z "$mac" ] && continue
+            
+            # Cek koneksi aktif
+            is_online=0
+            if ip neigh show | grep -i "$mac" | grep -qE "REACHABLE|DELAY"; then is_online=1
+            elif ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then is_online=1
+            elif command -v arping >/dev/null 2>&1 && arping -c 1 -w 1 -I "$FALLBACK_IFACE" "$ip" >/dev/null 2>&1; then is_online=1
+            fi
+
+            if [ $is_online -eq 1 ]; then
+                hostname=$(awk -v m="$mac" '$2==m {print $4}' /tmp/dhcp.leases 2>/dev/null)
+                DISPLAY_NAME=$(get_device_name "$mac" "$hostname")
+                
+                echo "$mac|$ip|pass|$DISPLAY_NAME" >> "$CURRENT_FILE"
+
+                if ! grep -q -i "^$mac|" "$STATE_FILE"; then
+                    echo "$mac|$ip|pass|$DISPLAY_NAME" >> "$STATE_FILE"
+                    MSG="🚀 <b>Perangkat Terhubung (LAN/WIFI)!</b>
 📡 Router: ${ROUTER_NAME}
 📱 Host: ${DISPLAY_NAME}
 🌐 IP: ${ip}
 🏷️ MAC: ${mac}
-📶 Jalur: ${CONN_TYPE}
+📶 Jalur: ${FALLBACK_IFACE}
 ===========================
                  By. K I H E O"
-                send_telegram "$MSG"
+                    send_telegram "$MSG"
+                fi
             fi
-        fi
-    done
+        done
 
-    if [ -f "$STATE_FILE" ]; then
-        TEMP_STATE="/tmp/temp_state_v2.txt"
-        > "$TEMP_STATE"
-
-        while IFS='|' read -r mac display_name ip; do
-            mac=$(echo "$mac" | tr -d '\r')
-            [ -z "$mac" ] && continue
-            
-            if ! grep -q -i "^$mac|" "$CURRENT_FILE"; then
-                if ! is_device_online "$ip" "$mac"; then
-                    MSG="🔻 <b>Perangkat Terputus!</b>
+        # Logika Terputus untuk standar interface
+        if [ -f "$STATE_FILE" ]; then
+            TEMP_STATE="/tmp/telenotif_temp.txt"
+            > "$TEMP_STATE"
+            while IFS='|' read -r mac ip status display_name; do
+                [ -z "$mac" ] && continue
+                if ! grep -q -i "^$mac|" "$CURRENT_FILE"; then
+                    # Tes ping terakhir sebelum diklaim offline
+                    if ! ping -c 1 -W 1 "$ip" >/dev/null 2>&1 && ! (command -v arping >/dev/null 2>&1 && arping -c 1 -w 1 -I "$FALLBACK_IFACE" "$ip" >/dev/null 2>&1); then
+                        MSG="🔻 <b>Perangkat Terputus!</b>
 📡 Router: ${ROUTER_NAME}
 📱 Host: ${display_name}
 🌐 IP: ${ip}
 🏷️ MAC: ${mac}
 ========================
               By. K I H E O"
-                    send_telegram "$MSG"
+                        send_telegram "$MSG"
+                    else
+                        echo "$mac|$ip|$status|$display_name" >> "$TEMP_STATE"
+                    fi
                 else
-                    echo "$mac|$display_name|$ip" >> "$TEMP_STATE"
+                    echo "$mac|$ip|$status|$display_name" >> "$TEMP_STATE"
                 fi
-            else
-                echo "$mac|$display_name|$ip" >> "$TEMP_STATE"
-            fi
-        done < "$STATE_FILE"
-        mv "$TEMP_STATE" "$STATE_FILE"
+            done < "$STATE_FILE"
+            mv "$TEMP_STATE" "$STATE_FILE"
+        fi
     fi
-    sleep 5
+
+    sleep 3
 done
 EOF
 
-# Subtitusi Konfigurasi ke Script Utama
+# Subtitusi Variabel ke dalam Script
 sed -i "s|CONF_TOKEN|${USER_TOKEN}|g" /usr/bin/telenotif
 sed -i "s|CONF_CHAT_ID|${USER_CHAT_ID}|g" /usr/bin/telenotif
 sed -i "s|CONF_ROUTER_NAME|${ROUTER_NAME}|g" /usr/bin/telenotif
-sed -i "s|CONF_IFACE1|${IFACE_1}|g" /usr/bin/telenotif
-sed -i "s|CONF_IFACE2|${IFACE_2}|g" /usr/bin/telenotif
+sed -i "s|CONF_IFACE|${FALLBACK_IFACE}|g" /usr/bin/telenotif
+sed -i "s|CONF_TIME|${INSTALL_TIME}|g" /usr/bin/telenotif
 
 chmod +x /usr/bin/telenotif
 
 # 4. Membuat Perintah Uninstall (/usr/bin/unbotnotif)
 cat << 'EOF' > /usr/bin/unbotnotif
 #!/bin/sh
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-printf "${CYAN}====================================================${NC}\n"
-printf "${RED}       UNINSTALL NOTIFIKASI TELEGRAM BY.KIHEO      ${NC}\n"
-printf "${CYAN}====================================================${NC}\n"
-
 if [ -f /etc/init.d/telenotif ]; then
     /etc/init.d/telenotif disable 2>/dev/null
     /etc/init.d/telenotif stop 2>/dev/null
     rm -f /etc/init.d/telenotif
 fi
-
 killall telenotif 2>/dev/null
-rm -f /usr/bin/telenotif
-rm -f /tmp/known_macs*.txt /tmp/current_active*.txt /tmp/temp_state*.txt /tmp/active_arp.txt
-
-printf "${GREEN}✔ Bot notifikasi telegram berhasil dihapus total!${NC}\n"
-printf "${CYAN}====================================================${NC}\n"
+rm -f /usr/bin/telenotif /tmp/telenotif_*.txt /tmp/active_arp.txt
+echo -e "\033[0;32m✔ Bot berhasil dihapus total!\033[0m"
 rm -f /usr/bin/unbotnotif
 EOF
-
 chmod +x /usr/bin/unbotnotif
 
-printf "${GREEN}✔ File bot dibuat di /usr/bin/telenotif${NC}\n"
-printf "${GREEN}✔ File uninstall dibuat di /usr/bin/unbotnotif${NC}\n\n"
-
-# 5. Membuat Service Auto-start & Eksekusi Langsung
-printf "${BLUE}[4/4] Mengatur Layanan Latar Belakang (Auto-Start)...${NC}\n"
-
-killall telenotif 2>/dev/null
-
+# 5. Konfigurasi Autostart dan Menjalankan Bot
 if [ -d "/etc/init.d" ]; then
 cat << 'EOF' > /etc/init.d/telenotif
 #!/bin/sh /etc/rc.common
-
 START=99
 STOP=10
-
 start() {
     killall telenotif 2>/dev/null
     /usr/bin/telenotif >/dev/null 2>&1 &
 }
-
 stop() {
     killall telenotif 2>/dev/null
 }
 EOF
-
 chmod +x /etc/init.d/telenotif
 /etc/init.d/telenotif enable 2>/dev/null
 /etc/init.d/telenotif start 2>/dev/null
@@ -343,7 +286,7 @@ killall telenotif 2>/dev/null
 printf "\n${CYAN}====================================================${NC}\n"
 printf "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}\n"
 printf "${CYAN}====================================================${NC}\n"
-printf "Status Bot      : ${YELLOW}Berjalan otomatis di latar belakang${NC}\n"
-printf "Jalur Dipantau  : ${YELLOW}${IFACE_1} & ${IFACE_2}${NC}\n"
+printf "Status Bot      : ${YELLOW}Berjalan Otomatis${NC}\n"
+printf "Waktu Install   : ${YELLOW}${INSTALL_TIME}${NC}\n"
 printf "Cara Hentikan   : Ketik ${RED}unbotnotif${NC} di terminal\n"
 printf "${CYAN}====================================================${NC}\n"
