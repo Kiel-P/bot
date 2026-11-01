@@ -108,12 +108,12 @@ else
     ROUTER_NAME="$USER_ROUTER_NAME"
 fi
 
-printf "Masukkan Interface Jaringan [Default: br-lan] : "
+printf "Masukkan Interface Cadangan [Default: br-lan] : "
 read USER_IFACE
 if [ -z "$USER_IFACE" ]; then
-    MONITOR_IFACE="br-lan"
+    FALLBACK_IFACE="br-lan"
 else
-    MONITOR_IFACE="$USER_IFACE"
+    FALLBACK_IFACE="$USER_IFACE"
 fi
 
 printf "${GREEN}✔ Konfigurasi berhasil disimpan!${NC}\n\n"
@@ -127,7 +127,7 @@ cat << 'EOF' > /usr/bin/telenotif
 TELEGRAM_TOKEN="CONF_TOKEN"
 CHAT_ID="CONF_CHAT_ID"
 ROUTER_NAME="CONF_ROUTER_NAME"
-MONITOR_IFACE="CONF_IFACE"
+FALLBACK_IFACE="CONF_IFACE"
 
 LEASE_FILE="/tmp/dhcp.leases"
 STATE_FILE="/tmp/known_macs_v2.txt"
@@ -137,10 +137,9 @@ ALIAS_FILE="/etc/config/host_alias.conf"
 touch "$STATE_FILE"
 
 send_telegram() {
-    local message="$1"
     curl -k -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
         -d "chat_id=${CHAT_ID}" \
-        --data-urlencode "text=${message}" \
+        --data-urlencode "text=$1" \
         -d "parse_mode=HTML" > /dev/null 2>&1 &
 }
 
@@ -164,17 +163,25 @@ is_device_online() {
     local ip="$1"
     local mac="$2"
 
+    # 1. Cek status live di ARP
     if ip neigh show | grep -i "$mac" | grep -qE "REACHABLE|DELAY"; then return 0; fi
+    
+    # 2. Ping ICMP biasa
     if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then return 0; fi
+    
+    # 3. AUTO-DETECT INTERFACE: Ekstrak antarmuka live perangkat dari sistem
+    local auto_iface=$(ip neigh show | grep -i "$mac" | awk '{print $3}' | head -n 1)
+    [ -z "$auto_iface" ] && auto_iface="$FALLBACK_IFACE"
+    
     if command -v arping >/dev/null 2>&1; then
-        if arping -c 1 -w 1 -I "$MONITOR_IFACE" "$ip" >/dev/null 2>&1; then return 0; fi
+        if arping -c 1 -w 1 -I "$auto_iface" "$ip" >/dev/null 2>&1; then return 0; fi
     fi
     
     return 1
 }
 
 send_telegram "🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
-Sistem siap memantau jaringan <b>${ROUTER_NAME}</b> via <b>${MONITOR_IFACE}</b>.
+Sistem siap memantau jaringan <b>${ROUTER_NAME}</b> dengan Auto-Detect Interface.
 ===========================
                  By. K I H E O"
 
@@ -182,7 +189,7 @@ while true; do
     > "$CURRENT_FILE"
     > /tmp/active_arp.txt
     
-    ip neigh show | grep -E "REACHABLE|DELAY|STALE" | awk '{print $5"|"$1}' | grep ":" >> /tmp/active_arp.txt
+    ip neigh show | awk '/REACHABLE|DELAY|STALE/ {print $5"|"$1}' | grep ":" >> /tmp/active_arp.txt
     [ -f "$LEASE_FILE" ] && awk '{print $2"|"$3}' "$LEASE_FILE" 2>/dev/null >> /tmp/active_arp.txt
 
     sort -u /tmp/active_arp.txt | while IFS='|' read -r mac ip; do
@@ -199,19 +206,16 @@ while true; do
             if ! grep -q -i "^$mac|" "$STATE_FILE"; then
                 echo "$mac|$DISPLAY_NAME|$ip" >> "$STATE_FILE"
                 
-                CONN_TYPE="🔌 Terhubung ke Jaringan"
-                if command -v iwinfo >/dev/null 2>&1; then
-                    if iwinfo wlan0 assoclist 2>/dev/null | grep -q -i "$mac"; then
-                        CONN_TYPE="📶 STB Wi-Fi"
-                    fi
-                fi
-
+                # Menampilkan interface asli (Auto-Detect) di Telegram
+                LIVE_IFACE=$(ip neigh show | grep -i "$mac" | awk '{print $3}' | head -n 1)
+                [ -z "$LIVE_IFACE" ] && LIVE_IFACE="$FALLBACK_IFACE"
+                
                 MSG="🚀 <b>Perangkat Terhubung!</b>
 📡 Router: ${ROUTER_NAME}
 📱 Host: ${DISPLAY_NAME}
 🌐 IP: ${ip}
 🏷️ MAC: ${mac}
-📶 Jalur: ${CONN_TYPE}
+📶 Jalur: ${LIVE_IFACE}
 ===========================
                  By. K I H E O"
                 send_telegram "$MSG"
@@ -254,7 +258,7 @@ EOF
 sed -i "s|CONF_TOKEN|${USER_TOKEN}|g" /usr/bin/telenotif
 sed -i "s|CONF_CHAT_ID|${USER_CHAT_ID}|g" /usr/bin/telenotif
 sed -i "s|CONF_ROUTER_NAME|${ROUTER_NAME}|g" /usr/bin/telenotif
-sed -i "s|CONF_IFACE|${MONITOR_IFACE}|g" /usr/bin/telenotif
+sed -i "s|CONF_IFACE|${FALLBACK_IFACE}|g" /usr/bin/telenotif
 
 chmod +x /usr/bin/telenotif
 
@@ -317,13 +321,13 @@ chmod +x /etc/init.d/telenotif
 /etc/init.d/telenotif start 2>/dev/null
 fi
 
+# Pastikan bot tereksekusi
 killall telenotif 2>/dev/null
 /usr/bin/telenotif >/dev/null 2>&1 &
 
 printf "\n${CYAN}====================================================${NC}\n"
 printf "${GREEN}       PEMASANGAN SELESAI & BOT AKTIF!             ${NC}\n"
 printf "${CYAN}====================================================${NC}\n"
-printf "Status Bot      : ${YELLOW}Berjalan otomatis di latar belakang${NC}\n"
-printf "Interface       : ${YELLOW}${MONITOR_IFACE}${NC}\n"
+printf "Status Bot      : ${YELLOW}Berjalan otomatis dengan Auto-Detect${NC}\n"
 printf "Cara Hentikan   : Ketik ${RED}unbotnotif${NC} di terminal\n"
 printf "${CYAN}====================================================${NC}\n"
