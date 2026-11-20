@@ -14,5 +14,9 @@ ke /etc/config/host_alias.conf
 telenotif-status
 
 `````
+## Uninstall 
+`````
+unbotnotif
+`````
 
 By. KIHEO
