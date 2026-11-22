@@ -3,8 +3,8 @@
 # ====================================================
 #   KIHEO-BOT HUB INSTALLER (UNIFIED CYBER PANEL UI)
 #   Command Utama: kiheo
+#   Repo: https://github.com/kiel-p/bot
 #   Support: OpenWrt 21.02 - 25.12+ (opkg & apk)
-#   Anti-Spam: Wi-Fi Assoc Dump + Multi-Probe + Lock
 # ====================================================
 
 CYAN='\033[0;36m'
@@ -140,418 +140,7 @@ EOF_UI
 chmod +x /usr/lib/kiheo/ui.sh
 
 # ====================================================
-# 2. SCRIPT DAEMON & PERINTAH CLI BOT NOTIF
-# ====================================================
-cat << 'EOF_DAEMON' > /usr/bin/telenotif
-#!/bin/sh
-
-PID_FILE="/var/run/telenotif.pid"
-if [ -f "$PID_FILE" ]; then
-    OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-        exit 0
-    fi
-fi
-echo "$$" > "$PID_FILE"
-trap 'rm -f "$PID_FILE"; exit 0' INT TERM EXIT
-
-[ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
-
-: "${MAX_MISSES:=4}"
-: "${PROBE_INTERVAL:=2}"
-: "${WIFI_INACTIVE_MAX:=300000}"
-: "${FALLBACK_IFACE:=br-lan}"
-
-STATE_FILE="/tmp/telenotif_state.txt"
-CURRENT_FILE="/tmp/telenotif_current.txt"
-CANDIDATE_FILE="/tmp/telenotif_candidates.txt"
-WIFI_ASSOC_FILE="/tmp/telenotif_wifi_assoc.txt"
-CHILLI_TEMP="/tmp/chilli_raw.txt"
-ALIAS_FILE="/etc/config/host_alias.conf"
-
-touch "$STATE_FILE"
-
-ARPING_FLAG="-w"
-ARPING_FAST=""
-if command -v arping >/dev/null 2>&1; then
-    ARPING_HELP=$(arping -h 2>&1; arping --help 2>&1)
-    printf '%s' "$ARPING_HELP" | grep -q -- "-W" && ARPING_FLAG="-W"
-    printf '%s' "$ARPING_HELP" | grep -q -- "-f" && ARPING_FAST="-f"
-fi
-
-WAN_IFACE=$(ip -4 route show default 2>/dev/null | awk '{print $5}' | head -n1)
-
-escape_html() {
-    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
-}
-
-format_mac() {
-    printf '%s' "$1" | tr '-' ':' | tr '[:upper:]' '[:lower:]' | tr -d '\r'
-}
-
-send_telegram() {
-    local text="$1"
-    local ids
-    ids=$(printf '%s' "$CHAT_ID" | tr ',;' '  ')
-    for target_id in $ids; do
-        [ -z "$target_id" ] && continue
-        curl -k -s --connect-timeout 5 -m 10 -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-            -d "chat_id=${target_id}" \
-            --data-urlencode "text=${text}" \
-            -d "parse_mode=HTML" >/dev/null 2>&1 &
-        sleep 0.1
-    done
-}
-
-get_device_name() {
-    local mac="$1" hostname="$2" alias_name=""
-    [ -f "$ALIAS_FILE" ] && alias_name=$(grep -i "^${mac}" "$ALIAS_FILE" | awk '{print $2}' | head -n1)
-    if [ -n "$alias_name" ]; then
-        printf '%s' "$alias_name"
-    elif [ -n "$hostname" ] && [ "$hostname" != "*" ]; then
-        printf '%s' "$hostname"
-    else
-        printf '%s' "Perangkat Tanpa Nama"
-    fi
-}
-
-refresh_wifi_clients() {
-    > "$WIFI_ASSOC_FILE"
-
-    # Metode 1: iw station dump (flush setiap baris ^Station agar semua klien terbaca)
-    if command -v iw >/dev/null 2>&1; then
-        for dev_path in /sys/class/net/*; do
-            [ -e "$dev_path/wireless" ] || [ -e "$dev_path/phy80211" ] || continue
-            wdev=$(basename "$dev_path")
-            iw dev "$wdev" station dump 2>/dev/null | awk -v max_ms="$WIFI_INACTIVE_MAX" '
-                function flush() {
-                    if (mac != "" && auth == "yes" && inact <= max_ms) print mac
-                }
-                /^Station / {
-                    flush()
-                    mac = tolower($2)
-                    inact = 0
-                    auth = "yes"
-                }
-                /inactive time:/ { inact = $3 + 0 }
-                /authorized:/ { auth = $2 }
-                END { flush() }
-            ' >> "$WIFI_ASSOC_FILE"
-        done
-    fi
-
-    # Metode 2: iwinfo assoclist (fallback driver non-mac80211)
-    if [ ! -s "$WIFI_ASSOC_FILE" ] && command -v iwinfo >/dev/null 2>&1; then
-        for dev_path in /sys/class/net/*; do
-            [ -e "$dev_path/wireless" ] || [ -e "$dev_path/phy80211" ] || continue
-            wdev=$(basename "$dev_path")
-            iwinfo "$wdev" assoclist 2>/dev/null | awk -v max_ms="$WIFI_INACTIVE_MAX" '
-                $1 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ {
-                    mac = tolower($1); inact = 0
-                    for (i = 1; i <= NF; i++) {
-                        if ($i == "ms" && $(i+1) == "ago") inact = $(i-1) + 0
-                    }
-                    if (inact <= max_ms) print mac
-                }
-            ' >> "$WIFI_ASSOC_FILE"
-        done
-    fi
-
-    # Metode 3: ubus hostapd get_clients
-    if [ ! -s "$WIFI_ASSOC_FILE" ] && command -v ubus >/dev/null 2>&1; then
-        for hapd in $(ubus list 'hostapd.*' 2>/dev/null); do
-            ubus call "$hapd" get_clients 2>/dev/null | \
-                grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' | \
-                tr '[:upper:]' '[:lower:]' >> "$WIFI_ASSOC_FILE"
-        done
-    fi
-
-    [ -s "$WIFI_ASSOC_FILE" ] && sort -u "$WIFI_ASSOC_FILE" -o "$WIFI_ASSOC_FILE" 2>/dev/null
-}
-
-is_wifi_connected() {
-    local mac="$1"
-    [ -s "$WIFI_ASSOC_FILE" ] && grep -q -F -x "$mac" "$WIFI_ASSOC_FILE"
-}
-
-get_prev_miss_count() {
-    local mac="$1"
-    awk -F'|' -v m="$mac" 'tolower($1)==m {print ($5=="" ? 0 : $5); exit}' "$STATE_FILE" 2>/dev/null
-}
-
-probe_device() {
-    local target_ip="$1"
-    local target_iface="${2:-$FALLBACK_IFACE}"
-    local prev_misses="${3:-0}"
-    [ -z "$target_ip" ] && return 1
-
-    local arp_count=1
-    [ "$prev_misses" -gt 0 ] 2>/dev/null && arp_count=2
-
-    if command -v arping >/dev/null 2>&1; then
-        if arping ${ARPING_FAST} -c "$arp_count" ${ARPING_FLAG} 1 -I "$target_iface" "$target_ip" >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-
-    if ping -c 1 -W 1 "$target_ip" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    return 1
-}
-
-WAIT_NET=0
-while [ $WAIT_NET -lt 30 ]; do
-    if curl -k -s --connect-timeout 3 -I "https://api.telegram.org" >/dev/null 2>&1; then
-        break
-    fi
-    WAIT_NET=$((WAIT_NET + 1))
-    sleep 2
-done
-
-SAFE_ROUTER=$(escape_html "$ROUTER_NAME")
-
-send_telegram "🤖 <b>KIHEO-BOT Notif Aktif!</b>
-Sistem siap memantau jaringan <b>${SAFE_ROUTER}</b>
-Mode: Real-Time Wi-Fi Assoc + Multi-Probe (${MAX_MISSES}x / ${PROBE_INTERVAL}s)
-⏱️ Aktif pada: $(date +"%d-%m-%Y %H:%M:%S")
-===========================
-                 By. K I H E O"
-
-while true; do
-    > "$CANDIDATE_FILE"
-    > "$CURRENT_FILE"
-    > "$CHILLI_TEMP"
-
-    refresh_wifi_clients
-
-    if command -v chilli_query >/dev/null 2>&1; then
-        chilli_query list > "$CHILLI_TEMP" 2>/dev/null
-        while read -r mac_raw ip status session_id auth_state username _ ; do
-            [ -z "$mac_raw" ] && continue
-            mac=$(format_mac "$mac_raw")
-            ip=$(printf '%s' "$ip" | tr -d '\r')
-            status=$(printf '%s' "$status" | tr -d '\r')
-            [ -n "$mac" ] && [ -n "$ip" ] && printf '%s|%s|chilli:%s|%s\n' "$mac" "$ip" "$status" "$username" >> "$CANDIDATE_FILE"
-        done < "$CHILLI_TEMP"
-    fi
-
-    ip -4 neigh show 2>/dev/null | grep -E "REACHABLE|DELAY|STALE|PROBE" | while read -r line; do
-        ip=$(printf '%s' "$line" | awk '{print $1}')
-        dev=$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
-        mac_raw=$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}')
-        [ -z "$mac_raw" ] || [ -z "$ip" ] && continue
-        [ "$dev" = "lo" ] && continue
-        if [ -n "$WAN_IFACE" ] && [ "$dev" = "$WAN_IFACE" ] && [ "$dev" != "$FALLBACK_IFACE" ]; then
-            continue
-        fi
-        mac=$(format_mac "$mac_raw")
-        printf '%s|%s|%s|\n' "$mac" "$ip" "${dev:-$FALLBACK_IFACE}" >> "$CANDIDATE_FILE"
-    done
-
-    if [ -f "/tmp/dhcp.leases" ]; then
-        awk '{print tolower($2)"|"$3"|'"$FALLBACK_IFACE"'|"}' /tmp/dhcp.leases 2>/dev/null >> "$CANDIDATE_FILE"
-    fi
-
-    if [ -f "$STATE_FILE" ]; then
-        awk -F'|' '{print tolower($1)"|"$2"|"$3"|"}' "$STATE_FILE" 2>/dev/null >> "$CANDIDATE_FILE"
-    fi
-
-    awk -F'|' '!seen[$1]++ && $1 ~ /:/ && $2 ~ /\./' "$CANDIDATE_FILE" | while IFS='|' read -r mac ip iface chilli_user; do
-        probe_iface="$iface"
-        case "$iface" in
-            chilli:*) probe_iface="$FALLBACK_IFACE" ;;
-        esac
-
-        prev_misses=$(get_prev_miss_count "$mac")
-        [ -z "$prev_misses" ] && prev_misses=0
-
-        device_alive=0
-        if is_wifi_connected "$mac"; then
-            device_alive=1
-        elif probe_device "$ip" "$probe_iface" "$prev_misses"; then
-            device_alive=1
-        fi
-
-        if [ "$device_alive" -eq 1 ]; then
-            hostname=$(awk -v m="$mac" 'tolower($2)==m {print $4}' /tmp/dhcp.leases 2>/dev/null | head -n1)
-            if [ -n "$chilli_user" ] && [ "$chilli_user" != "-" ]; then
-                DISPLAY_NAME="$chilli_user"
-            else
-                DISPLAY_NAME=$(get_device_name "$mac" "$hostname")
-            fi
-
-            printf '%s|%s|%s|%s\n' "$mac" "$ip" "$probe_iface" "$DISPLAY_NAME" >> "$CURRENT_FILE"
-
-            if ! grep -q -i "^${mac}|" "$STATE_FILE"; then
-                printf '%s|%s|%s|%s|0\n' "$mac" "$ip" "$probe_iface" "$DISPLAY_NAME" >> "$STATE_FILE"
-                SAFE_NAME=$(escape_html "$DISPLAY_NAME")
-                MSG="🚀 <b>Perangkat Terhubung!</b>
-📡 Router: ${SAFE_ROUTER}
-📱 Host: ${SAFE_NAME}
-🌐 IP: ${ip}
-🏷️ MAC: ${mac}
-📶 Jalur: ${probe_iface}
-===========================
-                 By. K I H E O"
-                send_telegram "$MSG"
-            fi
-        fi
-    done
-
-    if [ -f "$STATE_FILE" ]; then
-        TEMP_STATE="/tmp/telenotif_temp.txt"
-        > "$TEMP_STATE"
-        while IFS='|' read -r mac ip iface display_name miss_count; do
-            [ -z "$mac" ] && continue
-            [ -z "$miss_count" ] && miss_count=0
-
-            active_line=$(grep -i "^${mac}|" "$CURRENT_FILE" | head -n1)
-            if [ -n "$active_line" ]; then
-                cur_ip=$(printf '%s' "$active_line" | awk -F'|' '{print $2}')
-                cur_iface=$(printf '%s' "$active_line" | awk -F'|' '{print $3}')
-                cur_name=$(printf '%s' "$active_line" | awk -F'|' '{print $4}')
-                printf '%s|%s|%s|%s|0\n' "$mac" "${cur_ip:-$ip}" "${cur_iface:-$iface}" "${cur_name:-$display_name}" >> "$TEMP_STATE"
-            else
-                miss_count=$((miss_count + 1))
-                if [ "$miss_count" -ge "$MAX_MISSES" ]; then
-                    ip neigh del "$ip" dev "$iface" >/dev/null 2>&1
-                    SAFE_NAME=$(escape_html "$display_name")
-                    MSG="🔻 <b>Perangkat Terputus!</b>
-📡 Router: ${SAFE_ROUTER}
-📱 Host: ${SAFE_NAME}
-🌐 IP: ${ip}
-🏷️ MAC: ${mac}
-===========================
-                 By. K I H E O"
-                    send_telegram "$MSG"
-                else
-                    printf '%s|%s|%s|%s|%s\n' "$mac" "$ip" "$iface" "$display_name" "$miss_count" >> "$TEMP_STATE"
-                fi
-            fi
-        done < "$STATE_FILE"
-        mv "$TEMP_STATE" "$STATE_FILE"
-    fi
-
-    sleep "$PROBE_INTERVAL"
-done
-EOF_DAEMON
-chmod +x /usr/bin/telenotif
-
-# Perintah: resbotnotif
-cat << 'EOF_RES' > /usr/bin/resbotnotif
-#!/bin/sh
-. /usr/lib/kiheo/ui.sh
-
-[ -f /etc/init.d/telenotif ] && /etc/init.d/telenotif stop >/dev/null 2>&1
-for pid in $(pgrep -f "/usr/bin/telenotif"); do
-    kill -9 "$pid" 2>/dev/null
-done
-rm -f /var/run/telenotif.pid /tmp/telenotif_current.txt /tmp/telenotif_candidates.txt /tmp/telenotif_wifi_assoc.txt /tmp/chilli_raw.txt
-
-if [ -f /etc/init.d/telenotif ]; then
-    /etc/init.d/telenotif enable >/dev/null 2>&1
-    /etc/init.d/telenotif start >/dev/null 2>&1
-else
-    /bin/sh /usr/bin/telenotif >/dev/null 2>&1 &
-fi
-
-sleep 1
-PIDS="$(ui_get_bot_pid)"
-
-ui_panel_top "$CYAN" "$BGREEN" "[ Kontrol Bot Notif ]" "[ Kontrol Bot Notif ]"
-if [ -n "$PIDS" ]; then
-    ui_panel_kv "$CYAN" "Aksi" "Start / Restart Bot" "${WHITE}Start / Restart Bot${NC}"
-    ui_panel_kv "$CYAN" "Status" "* AKTIF (PID: ${PIDS})" "${BGREEN}● AKTIF${NC} ${GRAY}(PID: ${PIDS})${NC}"
-else
-    ui_panel_kv "$CYAN" "Aksi" "Start / Restart Bot" "${WHITE}Start / Restart Bot${NC}"
-    ui_panel_kv "$CYAN" "Status" "* GAGAL MENJALANKAN" "${BRED}● GAGAL MENJALANKAN${NC}"
-fi
-ui_panel_bot "$CYAN"
-EOF_RES
-chmod +x /usr/bin/resbotnotif
-
-# Perintah: stopbotnotif
-cat << 'EOF_STOP' > /usr/bin/stopbotnotif
-#!/bin/sh
-. /usr/lib/kiheo/ui.sh
-
-[ -f /etc/init.d/telenotif ] && /etc/init.d/telenotif stop >/dev/null 2>&1
-for pid in $(pgrep -f "/usr/bin/telenotif"); do
-    kill -9 "$pid" 2>/dev/null
-done
-rm -f /var/run/telenotif.pid /tmp/telenotif_current.txt /tmp/telenotif_candidates.txt /tmp/telenotif_wifi_assoc.txt /tmp/chilli_raw.txt
-
-ui_panel_top "$CYAN" "$BGREEN" "[ Kontrol Bot Notif ]" "[ Kontrol Bot Notif ]"
-ui_panel_kv "$CYAN" "Aksi" "Stop / Matikan Bot" "${WHITE}Stop / Matikan Bot${NC}"
-ui_panel_kv "$CYAN" "Status" "* STOPPED (Mati)" "${BRED}● STOPPED${NC} ${GRAY}(Mati)${NC}"
-ui_panel_kv "$CYAN" "Lanjut" "Ketik 'resbotnotif'" "${YELLOW}Ketik 'resbotnotif'${NC}"
-ui_panel_bot "$CYAN"
-EOF_STOP
-chmod +x /usr/bin/stopbotnotif
-
-# Perintah: cekbot & telenotif-status (Kotak Rounded Penuh Presisi)
-cat << 'EOF_CEK' > /usr/bin/cekbot
-#!/bin/sh
-. /usr/lib/kiheo/ui.sh
-[ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
-: "${MAX_MISSES:=4}"
-: "${PROBE_INTERVAL:=2}"
-
-PIDS="$(ui_get_bot_pid)"
-NOW_TIME="$(ui_get_localtime)"
-
-ui_panel_top "$CYAN" "$BGREEN" "[ Status Bot Notifikasi ]" "[ Status Bot Notifikasi ]"
-if [ -n "$PIDS" ]; then
-    ui_panel_kv "$CYAN" "Status" "* AKTIF (PID: ${PIDS})" "${BGREEN}● AKTIF${NC} ${GRAY}(PID: ${PIDS})${NC}"
-else
-    ui_panel_kv "$CYAN" "Status" "* MATI / STOPPED" "${BRED}● MATI / STOPPED${NC}"
-fi
-ui_panel_kv "$CYAN" "Router / LAN" "${ROUTER_NAME:-KIHEO} (${FALLBACK_IFACE:-br-lan})" "${WHITE}${ROUTER_NAME:-KIHEO}${NC} ${GRAY}(${FALLBACK_IFACE:-br-lan})${NC}"
-ui_panel_kv "$CYAN" "Local Time" "${NOW_TIME}" "${WHITE}${NOW_TIME}${NC}"
-ui_panel_kv "$CYAN" "User ID Bot" "${CHAT_ID:--}" "${BMAGENTA}${CHAT_ID:--}${NC}"
-ui_panel_kv "$CYAN" "Mode Probe" "${MAX_MISSES}x gagal (interval ${PROBE_INTERVAL}s)" "${YELLOW}${MAX_MISSES}x gagal${NC} (interval ${CYAN}${PROBE_INTERVAL}s${NC})"
-ui_panel_bot "$CYAN"
-
-printf "\n"
-
-ui_panel_top "$BRED" "$BGREEN" ". Perangkat Terdeteksi ." "• Perangkat Terdeteksi •"
-ui_panel_line "$BRED" \
-    " MAC Address       IP Address     Host       Status " \
-    " ${BMAGENTA}MAC Address       IP Address     Host       Status${NC} "
-
-if [ -s /tmp/telenotif_state.txt ]; then
-    while IFS='|' read -r mac ip iface host miss; do
-        [ -z "$mac" ] && continue
-        [ -z "$miss" ] && miss=0
-        mac_f="$(printf '%-17s' "$mac" | cut -c1-17)"
-        ip_f="$(printf '%-14s' "$ip" | cut -c1-14)"
-        host_f="$(printf '%-10s' "$host" | cut -c1-10)"
-        if [ "$miss" -eq 0 ]; then
-            st_plain="ONLINE"
-            st_color="${BGREEN}ONLINE${NC}"
-        else
-            st_plain="$(printf 'RTRY %s' "$miss" | cut -c1-6)"
-            st_plain="$(printf '%-6s' "$st_plain")"
-            st_color="${YELLOW}${st_plain}${NC}"
-        fi
-        row_plain=" ${mac_f} ${ip_f} ${host_f} ${st_plain} "
-        row_color=" ${WHITE}${mac_f}${NC} ${CYAN}${ip_f}${NC} ${WHITE}${host_f}${NC} ${st_color} "
-        ui_panel_line "$BRED" "$row_plain" "$row_color"
-    done < /tmp/telenotif_state.txt
-else
-    ui_panel_line "$BRED" \
-        "   (Belum ada perangkat aktif yang terdeteksi)     " \
-        "   ${GRAY}(Belum ada perangkat aktif yang terdeteksi)${NC}     "
-fi
-ui_panel_bot "$BRED"
-EOF_CEK
-chmod +x /usr/bin/cekbot
-ln -sf /usr/bin/cekbot /usr/bin/telenotif-status
-
-# ====================================================
-# 3. MODUL BOT NOTIFIKASI (/usr/lib/kiheo/modules/botnotif.sh)
+# 2. MODUL BOT NOTIFIKASI (/usr/lib/kiheo/modules/botnotif.sh)
 # ====================================================
 cat << 'EOF_MOD_NOTIF' > /usr/lib/kiheo/modules/botnotif.sh
 #!/bin/sh
@@ -613,6 +202,423 @@ bn_is_installed() {
     [ -x /usr/bin/telenotif ] && [ -f "$CONF_FILE" ]
 }
 
+bn_create_binaries() {
+    # Daemon utama /usr/bin/telenotif (Standar Wi-Fi Assoc + Multi-Probe)
+    cat << 'EOF_DAEMON' > /usr/bin/telenotif
+#!/bin/sh
+
+PID_FILE="/var/run/telenotif.pid"
+if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        exit 0
+    fi
+fi
+echo "$$" > "$PID_FILE"
+trap 'rm -f "$PID_FILE"; exit 0' INT TERM EXIT
+
+[ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
+
+: "${MAX_MISSES:=15}"
+: "${PROBE_INTERVAL:=2}"
+: "${WIFI_INACTIVE_MAX:=300000}"
+: "${FALLBACK_IFACE:=br-lan}"
+
+STATE_FILE="/tmp/telenotif_state.txt"
+CURRENT_FILE="/tmp/telenotif_current.txt"
+CANDIDATE_FILE="/tmp/telenotif_candidates.txt"
+WIFI_ASSOC_FILE="/tmp/telenotif_wifi_assoc.txt"
+CHILLI_TEMP="/tmp/chilli_raw.txt"
+ALIAS_FILE="/etc/config/host_alias.conf"
+IGNORE_FILE="/etc/telenotif.ignore"
+
+touch "$STATE_FILE" "$IGNORE_FILE"
+
+ARPING_FLAG="-w"
+ARPING_FAST=""
+if command -v arping >/dev/null 2>&1; then
+    ARPING_HELP=$(arping -h 2>&1; arping --help 2>&1)
+    printf '%s' "$ARPING_HELP" | grep -q -- "-W" && ARPING_FLAG="-W"
+    printf '%s' "$ARPING_HELP" | grep -q -- "-f" && ARPING_FAST="-f"
+fi
+
+WAN_IFACE=$(ip -4 route show default 2>/dev/null | awk '{print $5}' | head -n1)
+
+escape_html() {
+    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+}
+
+format_mac() {
+    printf '%s' "$1" | tr '-' ':' | tr '[:upper:]' '[:lower:]' | tr -d '\r'
+}
+
+is_ignored_mac() {
+    local mac="$1"
+    [ -s "$IGNORE_FILE" ] && grep -qi "^${mac}$" "$IGNORE_FILE"
+}
+
+send_telegram() {
+    local text="$1"
+    local ids
+    ids=$(printf '%s' "$CHAT_ID" | tr ',;' '  ')
+    for target_id in $ids; do
+        [ -z "$target_id" ] && continue
+        curl -k -s --connect-timeout 5 -m 10 -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d "chat_id=${target_id}" \
+            --data-urlencode "text=${text}" \
+            -d "parse_mode=HTML" >/dev/null 2>&1 &
+        sleep 0.1
+    done
+}
+
+get_device_name() {
+    local mac="$1" hostname="$2" alias_name=""
+    [ -f "$ALIAS_FILE" ] && alias_name=$(grep -i "^${mac}" "$ALIAS_FILE" | awk '{print $2}' | head -n1)
+    if [ -n "$alias_name" ]; then
+        printf '%s' "$alias_name"
+    elif [ -n "$hostname" ] && [ "$hostname" != "*" ]; then
+        printf '%s' "$hostname"
+    else
+        printf '%s' "Perangkat Tanpa Nama"
+    fi
+}
+
+refresh_wifi_clients() {
+    > "$WIFI_ASSOC_FILE"
+
+    if command -v iw >/dev/null 2>&1; then
+        for dev_path in /sys/class/net/*; do
+            [ -e "$dev_path/wireless" ] || [ -e "$dev_path/phy80211" ] || continue
+            wdev=$(basename "$dev_path")
+            iw dev "$wdev" station dump 2>/dev/null | awk -v max_ms="$WIFI_INACTIVE_MAX" '
+                function flush() {
+                    if (mac != "" && auth == "yes" && inact <= max_ms) print mac
+                }
+                /^Station / {
+                    flush()
+                    mac = tolower($2)
+                    inact = 0
+                    auth = "yes"
+                }
+                /inactive time:/ { inact = $3 + 0 }
+                /authorized:/ { auth = $2 }
+                END { flush() }
+            ' >> "$WIFI_ASSOC_FILE"
+        done
+    fi
+
+    if [ ! -s "$WIFI_ASSOC_FILE" ] && command -v iwinfo >/dev/null 2>&1; then
+        for dev_path in /sys/class/net/*; do
+            [ -e "$dev_path/wireless" ] || [ -e "$dev_path/phy80211" ] || continue
+            wdev=$(basename "$dev_path")
+            iwinfo "$wdev" assoclist 2>/dev/null | awk -v max_ms="$WIFI_INACTIVE_MAX" '
+                $1 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ {
+                    mac = tolower($1); inact = 0
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == "ms" && $(i+1) == "ago") inact = $(i-1) + 0
+                    }
+                    if (inact <= max_ms) print mac
+                }
+            ' >> "$WIFI_ASSOC_FILE"
+        done
+    fi
+
+    if [ ! -s "$WIFI_ASSOC_FILE" ] && command -v ubus >/dev/null 2>&1; then
+        for hapd in $(ubus list 'hostapd.*' 2>/dev/null); do
+            ubus call "$hapd" get_clients 2>/dev/null | \
+                grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' | \
+                tr '[:upper:]' '[:lower:]' >> "$WIFI_ASSOC_FILE"
+        done
+    fi
+
+    [ -s "$WIFI_ASSOC_FILE" ] && sort -u "$WIFI_ASSOC_FILE" -o "$WIFI_ASSOC_FILE" 2>/dev/null
+}
+
+is_wifi_connected() {
+    local mac="$1"
+    [ -s "$WIFI_ASSOC_FILE" ] && grep -q -F -x "$mac" "$WIFI_ASSOC_FILE"
+}
+
+get_prev_miss_count() {
+    local mac="$1"
+    awk -F'|' -v m="$mac" 'tolower($1)==m {print ($5=="" ? 0 : $5); exit}' "$STATE_FILE" 2>/dev/null
+}
+
+probe_device() {
+    local target_ip="$1"
+    local target_iface="${2:-$FALLBACK_IFACE}"
+    local prev_misses="${3:-0}"
+    [ -z "$target_ip" ] && return 1
+
+    local arp_count=1
+    [ "$prev_misses" -gt 0 ] 2>/dev/null && arp_count=2
+
+    if command -v arping >/dev/null 2>&1; then
+        if arping ${ARPING_FAST} -c "$arp_count" ${ARPING_FLAG} 1 -I "$target_iface" "$target_ip" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    if ping -c 1 -W 1 "$target_ip" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
+}
+
+WAIT_NET=0
+while [ $WAIT_NET -lt 30 ]; do
+    if curl -k -s --connect-timeout 3 -I "https://api.telegram.org" >/dev/null 2>&1; then
+        break
+    fi
+    WAIT_NET=$((WAIT_NET + 1))
+    sleep 2
+done
+
+SAFE_ROUTER=$(escape_html "$ROUTER_NAME")
+
+send_telegram "🤖 <b>KIHEO-BOT Notif Aktif!</b>
+Sistem siap memantau jaringan <b>${SAFE_ROUTER}</b>
+Mode: Wi-Fi Assoc + Multi-Probe (${MAX_MISSES}x / ${PROBE_INTERVAL}s)
+⏱️ Aktif pada: $(date +"%d-%m-%Y %H:%M:%S")
+===========================
+                 By. K I H E O"
+
+while true; do
+    > "$CANDIDATE_FILE"
+    > "$CURRENT_FILE"
+    > "$CHILLI_TEMP"
+
+    refresh_wifi_clients
+
+    if command -v chilli_query >/dev/null 2>&1; then
+        chilli_query list > "$CHILLI_TEMP" 2>/dev/null
+        while read -r mac_raw ip status session_id auth_state username _ ; do
+            [ -z "$mac_raw" ] && continue
+            mac=$(format_mac "$mac_raw")
+            ip=$(printf '%s' "$ip" | tr -d '\r')
+            status=$(printf '%s' "$status" | tr -d '\r')
+            [ -n "$mac" ] && [ -n "$ip" ] && printf '%s|%s|chilli:%s|%s\n' "$mac" "$ip" "$status" "$username" >> "$CANDIDATE_FILE"
+        done < "$CHILLI_TEMP"
+    fi
+
+    ip -4 neigh show 2>/dev/null | grep -E "REACHABLE|DELAY|STALE|PROBE" | while read -r line; do
+        ip=$(printf '%s' "$line" | awk '{print $1}')
+        dev=$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+        mac_raw=$(printf '%s' "$line" | awk '{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}')
+        [ -z "$mac_raw" ] || [ -z "$ip" ] && continue
+        [ "$dev" = "lo" ] && continue
+        if [ -n "$WAN_IFACE" ] && [ "$dev" = "$WAN_IFACE" ] && [ "$dev" != "$FALLBACK_IFACE" ]; then
+            continue
+        fi
+        mac=$(format_mac "$mac_raw")
+        printf '%s|%s|%s|\n' "$mac" "$ip" "${dev:-$FALLBACK_IFACE}" >> "$CANDIDATE_FILE"
+    done
+
+    if [ -f "/tmp/dhcp.leases" ]; then
+        awk '{print tolower($2)"|"$3"|'"$FALLBACK_IFACE"'|"}' /tmp/dhcp.leases 2>/dev/null >> "$CANDIDATE_FILE"
+    fi
+
+    if [ -f "$STATE_FILE" ]; then
+        awk -F'|' '{print tolower($1)"|"$2"|"$3"|"}' "$STATE_FILE" 2>/dev/null >> "$CANDIDATE_FILE"
+    fi
+
+    awk -F'|' '!seen[$1]++ && $1 ~ /:/ && $2 ~ /\./' "$CANDIDATE_FILE" | while IFS='|' read -r mac ip iface chilli_user; do
+        is_ignored_mac "$mac" && continue
+
+        probe_iface="$iface"
+        case "$iface" in
+            chilli:*) probe_iface="$FALLBACK_IFACE" ;;
+        esac
+
+        prev_misses=$(get_prev_miss_count "$mac")
+        [ -z "$prev_misses" ] && prev_misses=0
+
+        device_alive=0
+        if is_wifi_connected "$mac"; then
+            device_alive=1
+        elif probe_device "$ip" "$probe_iface" "$prev_misses"; then
+            device_alive=1
+        fi
+
+        if [ "$device_alive" -eq 1 ]; then
+            hostname=$(awk -v m="$mac" 'tolower($2)==m {print $4}' /tmp/dhcp.leases 2>/dev/null | head -n1)
+            if [ -n "$chilli_user" ] && [ "$chilli_user" != "-" ]; then
+                DISPLAY_NAME="$chilli_user"
+            else
+                DISPLAY_NAME=$(get_device_name "$mac" "$hostname")
+            fi
+
+            printf '%s|%s|%s|%s\n' "$mac" "$ip" "$probe_iface" "$DISPLAY_NAME" >> "$CURRENT_FILE"
+
+            if ! grep -q -i "^${mac}|" "$STATE_FILE"; then
+                printf '%s|%s|%s|%s|0\n' "$mac" "$ip" "$probe_iface" "$DISPLAY_NAME" >> "$STATE_FILE"
+                SAFE_NAME=$(escape_html "$DISPLAY_NAME")
+                MSG="🚀 <b>Perangkat Terhubung!</b>
+📡 Router: ${SAFE_ROUTER}
+📱 Host: ${SAFE_NAME}
+🌐 IP: ${ip}
+🏷️ MAC: ${mac}
+📶 Jalur: ${probe_iface}
+===========================
+                 By. K I H E O"
+                send_telegram "$MSG"
+            fi
+        fi
+    done
+
+    if [ -f "$STATE_FILE" ]; then
+        TEMP_STATE="/tmp/telenotif_temp.txt"
+        > "$TEMP_STATE"
+        while IFS='|' read -r mac ip iface display_name miss_count; do
+            [ -z "$mac" ] && continue
+            is_ignored_mac "$mac" && continue
+            [ -z "$miss_count" ] && miss_count=0
+
+            active_line=$(grep -i "^${mac}|" "$CURRENT_FILE" | head -n1)
+            if [ -n "$active_line" ]; then
+                cur_ip=$(printf '%s' "$active_line" | awk -F'|' '{print $2}')
+                cur_iface=$(printf '%s' "$active_line" | awk -F'|' '{print $3}')
+                cur_name=$(printf '%s' "$active_line" | awk -F'|' '{print $4}')
+                printf '%s|%s|%s|%s|0\n' "$mac" "${cur_ip:-$ip}" "${cur_iface:-$iface}" "${cur_name:-$display_name}" >> "$TEMP_STATE"
+            else
+                miss_count=$((miss_count + 1))
+                if [ "$miss_count" -ge "$MAX_MISSES" ]; then
+                    ip neigh del "$ip" dev "$iface" >/dev/null 2>&1
+                    SAFE_NAME=$(escape_html "$display_name")
+                    MSG="🔻 <b>Perangkat Terputus!</b>
+📡 Router: ${SAFE_ROUTER}
+📱 Host: ${SAFE_NAME}
+🌐 IP: ${ip}
+🏷️ MAC: ${mac}
+===========================
+                 By. K I H E O"
+                    send_telegram "$MSG"
+                else
+                    printf '%s|%s|%s|%s|%s\n' "$mac" "$ip" "$iface" "$display_name" "$miss_count" >> "$TEMP_STATE"
+                fi
+            fi
+        done < "$STATE_FILE"
+        mv "$TEMP_STATE" "$STATE_FILE"
+    fi
+
+    sleep "$PROBE_INTERVAL"
+done
+EOF_DAEMON
+    chmod +x /usr/bin/telenotif
+
+    # Perintah: resbotnotif
+    cat << 'EOF_RES' > /usr/bin/resbotnotif
+#!/bin/sh
+. /usr/lib/kiheo/ui.sh
+
+[ -f /etc/init.d/telenotif ] && /etc/init.d/telenotif stop >/dev/null 2>&1
+for pid in $(pgrep -f "/usr/bin/telenotif"); do
+    kill -9 "$pid" 2>/dev/null
+done
+rm -f /var/run/telenotif.pid /tmp/telenotif_current.txt /tmp/telenotif_candidates.txt /tmp/telenotif_wifi_assoc.txt /tmp/chilli_raw.txt
+
+if [ -f /etc/init.d/telenotif ]; then
+    /etc/init.d/telenotif enable >/dev/null 2>&1
+    /etc/init.d/telenotif start >/dev/null 2>&1
+else
+    /bin/sh /usr/bin/telenotif >/dev/null 2>&1 &
+fi
+
+sleep 1
+PIDS="$(ui_get_bot_pid)"
+
+ui_panel_top "$CYAN" "$BGREEN" "[ Kontrol Bot Notif ]" "[ Kontrol Bot Notif ]"
+if [ -n "$PIDS" ]; then
+    ui_panel_kv "$CYAN" "Aksi" "Start / Restart Bot" "${WHITE}Start / Restart Bot${NC}"
+    ui_panel_kv "$CYAN" "Status" "* AKTIF (PID: ${PIDS})" "${BGREEN}● AKTIF${NC} ${GRAY}(PID: ${PIDS})${NC}"
+else
+    ui_panel_kv "$CYAN" "Aksi" "Start / Restart Bot" "${WHITE}Start / Restart Bot${NC}"
+    ui_panel_kv "$CYAN" "Status" "* GAGAL MENJALANKAN" "${BRED}● GAGAL MENJALANKAN${NC}"
+fi
+ui_panel_bot "$CYAN"
+EOF_RES
+    chmod +x /usr/bin/resbotnotif
+
+    # Perintah: stopbotnotif
+    cat << 'EOF_STOP' > /usr/bin/stopbotnotif
+#!/bin/sh
+. /usr/lib/kiheo/ui.sh
+
+[ -f /etc/init.d/telenotif ] && /etc/init.d/telenotif stop >/dev/null 2>&1
+for pid in $(pgrep -f "/usr/bin/telenotif"); do
+    kill -9 "$pid" 2>/dev/null
+done
+rm -f /var/run/telenotif.pid /tmp/telenotif_current.txt /tmp/telenotif_candidates.txt /tmp/telenotif_wifi_assoc.txt /tmp/chilli_raw.txt
+
+ui_panel_top "$CYAN" "$BGREEN" "[ Kontrol Bot Notif ]" "[ Kontrol Bot Notif ]"
+ui_panel_kv "$CYAN" "Aksi" "Stop / Matikan Bot" "${WHITE}Stop / Matikan Bot${NC}"
+ui_panel_kv "$CYAN" "Status" "* STOPPED (Mati)" "${BRED}● STOPPED${NC} ${GRAY}(Mati)${NC}"
+ui_panel_kv "$CYAN" "Lanjut" "Ketik 'resbotnotif'" "${YELLOW}Ketik 'resbotnotif'${NC}"
+ui_panel_bot "$CYAN"
+EOF_STOP
+    chmod +x /usr/bin/stopbotnotif
+
+    # Perintah: cekbot & telenotif-status
+    cat << 'EOF_CEK' > /usr/bin/cekbot
+#!/bin/sh
+. /usr/lib/kiheo/ui.sh
+[ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
+: "${MAX_MISSES:=15}"
+: "${PROBE_INTERVAL:=2}"
+
+PIDS="$(ui_get_bot_pid)"
+NOW_TIME="$(ui_get_localtime)"
+
+ui_panel_top "$CYAN" "$BGREEN" "[ Status Bot Notifikasi ]" "[ Status Bot Notifikasi ]"
+if [ -n "$PIDS" ]; then
+    ui_panel_kv "$CYAN" "Status" "* AKTIF (PID: ${PIDS})" "${BGREEN}● AKTIF${NC} ${GRAY}(PID: ${PIDS})${NC}"
+else
+    ui_panel_kv "$CYAN" "Status" "* MATI / STOPPED" "${BRED}● MATI / STOPPED${NC}"
+fi
+ui_panel_kv "$CYAN" "Router / LAN" "${ROUTER_NAME:-KIHEO} (${FALLBACK_IFACE:-br-lan})" "${WHITE}${ROUTER_NAME:-KIHEO}${NC} ${GRAY}(${FALLBACK_IFACE:-br-lan})${NC}"
+ui_panel_kv "$CYAN" "Local Time" "${NOW_TIME}" "${WHITE}${NOW_TIME}${NC}"
+ui_panel_kv "$CYAN" "User ID Bot" "${CHAT_ID:--}" "${BMAGENTA}${CHAT_ID:--}${NC}"
+ui_panel_kv "$CYAN" "Mode Probe" "${MAX_MISSES}x gagal (interval ${PROBE_INTERVAL}s)" "${YELLOW}${MAX_MISSES}x gagal${NC} (interval ${CYAN}${PROBE_INTERVAL}s${NC})"
+ui_panel_bot "$CYAN"
+
+printf "\n"
+
+ui_panel_top "$BRED" "$BGREEN" ". Perangkat Terdeteksi ." "• Perangkat Terdeteksi •"
+ui_panel_line "$BRED" \
+    " MAC Address       IP Address     Host       Status " \
+    " ${BMAGENTA}MAC Address       IP Address     Host       Status${NC} "
+
+if [ -s /tmp/telenotif_state.txt ]; then
+    while IFS='|' read -r mac ip iface host miss; do
+        [ -z "$mac" ] && continue
+        [ -z "$miss" ] && miss=0
+        mac_f="$(printf '%-17s' "$mac" | cut -c1-17)"
+        ip_f="$(printf '%-14s' "$ip" | cut -c1-14)"
+        host_f="$(printf '%-10s' "$host" | cut -c1-10)"
+        if [ "$miss" -eq 0 ]; then
+            st_plain="ONLINE"
+            st_color="${BGREEN}ONLINE${NC}"
+        else
+            st_plain="$(printf 'RTRY %s' "$miss" | cut -c1-6)"
+            st_plain="$(printf '%-6s' "$st_plain")"
+            st_color="${YELLOW}${st_plain}${NC}"
+        fi
+        row_plain=" ${mac_f} ${ip_f} ${host_f} ${st_plain} "
+        row_color=" ${WHITE}${mac_f}${NC} ${CYAN}${ip_f}${NC} ${WHITE}${host_f}${NC} ${st_color} "
+        ui_panel_line "$BRED" "$row_plain" "$row_color"
+    done < /tmp/telenotif_state.txt
+else
+    ui_panel_line "$BRED" \
+        "   (Belum ada perangkat aktif yang terdeteksi)     " \
+        "   ${GRAY}(Belum ada perangkat aktif yang terdeteksi)${NC}     "
+fi
+ui_panel_bot "$BRED"
+EOF_CEK
+    chmod +x /usr/bin/cekbot
+    ln -sf /usr/bin/cekbot /usr/bin/telenotif-status
+}
+
 bn_install() {
     clear
     ui_banner
@@ -639,34 +645,34 @@ bn_install() {
 
     local USER_TOKEN=""
     while [ -z "$USER_TOKEN" ]; do
-        printf "${CYAN}Token Bot Telegram${NC}             : "
+        printf "${CYAN}Token Bot Telegram${NC}              : "
         read USER_TOKEN
         [ -z "$USER_TOKEN" ] && printf "${RED}Token tidak boleh kosong!${NC}\n"
     done
 
     local USER_CHAT_ID=""
     while [ -z "$USER_CHAT_ID" ]; do
-        printf "${CYAN}Chat / User ID Telegram${NC}        : "
+        printf "${CYAN}Chat / User ID Telegram${NC}         : "
         read USER_CHAT_ID
         [ -z "$USER_CHAT_ID" ] && printf "${RED}Chat ID tidak boleh kosong!${NC}\n"
     done
 
-    printf "${CYAN}Nama Router [Default: KIHEO]${NC}   : "
+    printf "${CYAN}Nama Router [Default: KIHEO]${NC}    : "
     read USER_ROUTER_NAME
     [ -z "$USER_ROUTER_NAME" ] && ROUTER_NAME="KIHEO" || ROUTER_NAME="$USER_ROUTER_NAME"
 
-    printf "${CYAN}Interface LAN [Default: br-lan]${NC}: "
+    printf "${CYAN}Interface LAN [Default: br-lan]${NC} : "
     read USER_IFACE
     [ -z "$USER_IFACE" ] && FALLBACK_IFACE="br-lan" || FALLBACK_IFACE="$USER_IFACE"
 
-    printf "${CYAN}Batas Gagal Probe [Default: 4]${NC} : "
+    printf "${CYAN}Batas Gagal Probe [Default: 15]${NC} : "
     read USER_MAX_MISSES
     case "$USER_MAX_MISSES" in
-        ''|*[!0-9]*|0) MAX_MISSES=4 ;;
+        ''|*[!0-9]*|0) MAX_MISSES=15 ;;
         *) MAX_MISSES="$USER_MAX_MISSES" ;;
     esac
 
-    printf "${CYAN}Interval Cek Detik [Default: 2]${NC}: "
+    printf "${CYAN}Interval Cek Detik [Default: 2]${NC} : "
     read USER_INTERVAL
     case "$USER_INTERVAL" in
         ''|*[!0-9]*|0) PROBE_INTERVAL=2 ;;
@@ -675,6 +681,8 @@ bn_install() {
 
     WIFI_INACTIVE_MAX=300000
     INSTALL_TIME="$(ui_get_localtime)"
+
+    bn_create_binaries
 
     cat << EOF_CONF > "$CONF_FILE"
 TELEGRAM_TOKEN="${USER_TOKEN}"
@@ -707,6 +715,120 @@ EOF_INIT
     /usr/bin/resbotnotif
 }
 
+bn_edit_probe() {
+    while true; do
+        [ -f "$CONF_FILE" ] && . "$CONF_FILE"
+        local cur_miss="${MAX_MISSES:-15}"
+        local cur_int="${PROBE_INTERVAL:-2}"
+        local total_sec=$(( cur_miss * cur_int ))
+
+        clear
+        ui_banner
+
+        ui_panel_top "$CYAN" "$BGREEN" "[ Pengaturan Mode Probe ]" "[ Pengaturan Mode Probe ]"
+        ui_panel_kv "$CYAN" "Batas Gagal" "${cur_miss}x percobaan" "${YELLOW}${cur_miss}x percobaan${NC}"
+        ui_panel_kv "$CYAN" "Interval Cek" "${cur_int} detik" "${CYAN}${cur_int} detik${NC}"
+        ui_panel_kv "$CYAN" "Total Jeda" "${total_sec} detik sebelum putus" "${WHITE}${total_sec} detik${NC} ${GRAY}sebelum putus${NC}"
+        ui_panel_bot "$CYAN"
+
+        printf "\n"
+        ui_panel_top "$MAGENTA" "$BMAGENTA" "PILIH MODE PROBE" "PILIH MODE PROBE"
+        ui_panel_line "$MAGENTA" \
+            "  1: Cepat / Real-Time   (4x / 2s = 8 detik)        " \
+            "  ${BGREEN}1:${NC} ${WHITE}Cepat / Real-Time${NC}   ${GRAY}(4x / 2s = 8 detik)${NC}        "
+        ui_panel_line "$MAGENTA" \
+            "  2: Normal / Seimbang   (15x / 2s = 30 detik)      " \
+            "  ${BGREEN}2:${NC} ${WHITE}Normal / Seimbang${NC}   ${GRAY}(15x / 2s = 30 detik)${NC}      "
+        ui_panel_line "$MAGENTA" \
+            "  3: Hemat Daya / AP     (45x / 2s = 90 detik)      " \
+            "  ${BGREEN}3:${NC} ${WHITE}Hemat Daya / AP${NC}     ${GRAY}(45x / 2s = 90 detik)${NC}      "
+        ui_panel_line "$MAGENTA" \
+            "  4: Custom Manual       (Isi Angka Sendiri)        " \
+            "  ${BGREEN}4:${NC} ${CYAN}Custom Manual${NC}       ${GRAY}(Isi Angka Sendiri)${NC}        "
+        ui_panel_line "$MAGENTA" \
+            "  00: Kembali ke Menu Bot Notif                     " \
+            "  ${BGREEN}00:${NC} ${WHITE}Kembali ke Menu Bot Notif${NC}                     "
+        ui_panel_bot "$MAGENTA"
+
+        printf "\n${WHITE}Pilihan: ${NC}"
+        read p_opt
+
+        local new_miss=""
+        local new_int=""
+
+        case "$p_opt" in
+            1)
+                new_miss=4
+                new_int=2
+                ;;
+            2)
+                new_miss=15
+                new_int=2
+                ;;
+            3)
+                new_miss=45
+                new_int=2
+                ;;
+            4)
+                printf "\n${CYAN}Masukkan Batas Gagal Probe [Saat ini: ${cur_miss}]${NC}   : "
+                read in_miss
+                case "$in_miss" in
+                    '') new_miss="$cur_miss" ;;
+                    *[!0-9]*|0)
+                        printf "${BRED}✖ Batas gagal harus angka minimal 1!${NC}\n"
+                        sleep 1
+                        continue
+                        ;;
+                    *) new_miss="$in_miss" ;;
+                esac
+
+                printf "${CYAN}Masukkan Interval Cek Detik [Saat ini: ${cur_int}]${NC}  : "
+                read in_int
+                case "$in_int" in
+                    '') new_int="$cur_int" ;;
+                    *[!0-9]*|0)
+                        printf "${BRED}✖ Interval cek harus angka minimal 1!${NC}\n"
+                        sleep 1
+                        continue
+                        ;;
+                    *) new_int="$in_int" ;;
+                esac
+                ;;
+            0|00|q|Q)
+                break
+                ;;
+            *)
+                printf "\n${BRED}Pilihan tidak valid!${NC}\n"
+                sleep 1
+                continue
+                ;;
+        esac
+
+        if [ -n "$new_miss" ] && [ -n "$new_int" ]; then
+            if grep -q '^MAX_MISSES=' "$CONF_FILE" 2>/dev/null; then
+                sed -i "s|^MAX_MISSES=.*|MAX_MISSES=\"${new_miss}\"|" "$CONF_FILE"
+            else
+                printf 'MAX_MISSES="%s"\n' "$new_miss" >> "$CONF_FILE"
+            fi
+
+            if grep -q '^PROBE_INTERVAL=' "$CONF_FILE" 2>/dev/null; then
+                sed -i "s|^PROBE_INTERVAL=.*|PROBE_INTERVAL=\"${new_int}\"|" "$CONF_FILE"
+            else
+                printf 'PROBE_INTERVAL="%s"\n' "$new_int" >> "$CONF_FILE"
+            fi
+
+            local new_total=$(( new_miss * new_int ))
+            printf "\n${BGREEN}✔ Mode Probe diubah menjadi ${new_miss}x gagal / ${new_int}s (Jeda ${new_total} detik)!${NC}\n"
+
+            if [ -n "$(ui_get_bot_pid)" ]; then
+                printf "${YELLOW}⟳ Menerapkan pengaturan ke layanan bot...${NC}\n"
+                /usr/bin/resbotnotif >/dev/null 2>&1
+            fi
+            sleep 1
+        fi
+    done
+}
+
 bn_uninstall_only() {
     if [ -f /etc/init.d/telenotif ]; then
         /etc/init.d/telenotif stop 2>/dev/null
@@ -716,7 +838,10 @@ bn_uninstall_only() {
     for pid in $(pgrep -f "/usr/bin/telenotif"); do
         kill -9 "$pid" 2>/dev/null
     done
-    rm -f /var/run/telenotif.pid "$CONF_FILE" /tmp/telenotif_*.txt /tmp/chilli_raw.txt
+    rm -f /var/run/telenotif.pid "$CONF_FILE" \
+          /usr/bin/telenotif /usr/bin/telenotif-status /usr/bin/cekbot \
+          /usr/bin/resbotnotif /usr/bin/stopbotnotif \
+          /tmp/telenotif_*.txt /tmp/chilli_raw.txt
     printf "\n"
     ui_panel_top "$CYAN" "$BGREEN" "[ Uninstall Bot Notif ]" "[ Uninstall Bot Notif ]"
     ui_panel_line "$CYAN" "  Konfigurasi & layanan Bot Notif telah dihapus.    " "  ${BGREEN}✔ Konfigurasi & layanan Bot Notif dihapus.${NC}    "
@@ -852,17 +977,17 @@ botnotif_menu() {
                 "  ID  Action                                        " \
                 "  ${BMAGENTA}ID  Action${NC}                                        "
             ui_panel_line "$BRED" \
-                "   I  Install Bot Notifikasi Sekarang               " \
-                "   ${BGREEN}I${NC}  ${WHITE}Install Bot Notifikasi Sekarang${NC}               "
+                "   1  Install                                       " \
+                "   ${BGREEN}1${NC}  ${WHITE}Install${NC}                                       "
             ui_panel_line "$BRED" \
-                "  00  Kembali ke Menu Utama kiheo                   " \
-                "  ${BGREEN}00${NC}  ${WHITE}Kembali ke Menu Utama kiheo${NC}                   "
+                "   0  Kembali                                       " \
+                "   ${BGREEN}0${NC}  ${WHITE}Kembali${NC}                                       "
             ui_panel_bot "$BRED"
 
             printf "\n${WHITE}Pilih menu: ${NC}"
             read m_opt
             case "$m_opt" in
-                i|I|1)
+                1|i|I)
                     bn_install
                     printf "\n${GRAY}Tekan Enter untuk lanjut...${NC}"
                     read _
@@ -894,7 +1019,7 @@ botnotif_menu() {
             ui_panel_kv "$CYAN" "Status" "${st_plain}" "${st_color}"
             ui_panel_kv "$CYAN" "User ID" "${CHAT_ID:--}" "${BMAGENTA}${CHAT_ID:--}${NC}"
             ui_panel_kv "$CYAN" "Perangkat" "${online_cnt} Online | ${retry_cnt} Retry" "${BGREEN}${online_cnt} Online${NC} | ${YELLOW}${retry_cnt} Retry${NC}"
-            ui_panel_kv "$CYAN" "Mode Probe" "${MAX_MISSES:-4}x gagal / ${PROBE_INTERVAL:-2}s" "${YELLOW}${MAX_MISSES:-4}x gagal${NC} / ${CYAN}${PROBE_INTERVAL:-2}s${NC}"
+            ui_panel_kv "$CYAN" "Mode Probe" "${MAX_MISSES:-15}x gagal / ${PROBE_INTERVAL:-2}s" "${YELLOW}${MAX_MISSES:-15}x gagal${NC} / ${CYAN}${PROBE_INTERVAL:-2}s${NC}"
             ui_panel_kv "$CYAN" "Token" "${masked_tok}" "${RED}${masked_tok}${NC}"
             ui_panel_bot "$CYAN"
 
@@ -916,11 +1041,14 @@ botnotif_menu() {
                 "   4  Tambah / Kelola User ID Bot                   " \
                 "   ${BGREEN}4${NC}  ${WHITE}Tambah / Kelola${NC} ${BMAGENTA}User ID Bot${NC}                   "
             ui_panel_line "$BRED" \
-                "   5  Install Ulang / Konfigurasi Ulang             " \
-                "   ${BGREEN}5${NC}  ${WHITE}Install Ulang / Konfigurasi Ulang${NC}             "
+                "   5  Ubah Mode Probe (Batas & Interval)            " \
+                "   ${BGREEN}5${NC}  ${WHITE}Ubah Mode Probe${NC} ${YELLOW}(Batas & Interval)${NC}            "
             ui_panel_line "$BRED" \
-                "   6  Hapus / Uninstall Bot Notif                   " \
-                "   ${BGREEN}6${NC}  ${WHITE}Hapus / Uninstall Bot Notif${NC}                   "
+                "   6  Install Ulang / Konfigurasi Ulang             " \
+                "   ${BGREEN}6${NC}  ${WHITE}Install Ulang / Konfigurasi Ulang${NC}             "
+            ui_panel_line "$BRED" \
+                "   7  Hapus / Uninstall Bot Notif                   " \
+                "   ${BGREEN}7${NC}  ${WHITE}Hapus / Uninstall Bot Notif${NC}                   "
             ui_panel_line "$BRED" \
                 "  00  Kembali ke Menu Utama kiheo                   " \
                 "  ${BGREEN}00${NC}  ${WHITE}Kembali ke Menu Utama kiheo${NC}                   "
@@ -951,11 +1079,14 @@ botnotif_menu() {
                     bn_manage_user_ids
                     ;;
                 5)
+                    bn_edit_probe
+                    ;;
+                6)
                     bn_install
                     printf "\n${GRAY}Tekan Enter untuk kembali...${NC}"
                     read _
                     ;;
-                6)
+                7)
                     printf "\n${BRED}Yakin hapus Bot Notifikasi? [y/N]: ${NC}"
                     read cf
                     case "$cf" in
@@ -976,7 +1107,7 @@ EOF_MOD_NOTIF
 chmod +x /usr/lib/kiheo/modules/botnotif.sh
 
 # ====================================================
-# 4. LAUNCHER UTAMA (/usr/bin/kiheo)
+# 3. LAUNCHER UTAMA (/usr/bin/kiheo)
 # ====================================================
 cat << 'EOF_KIHEO_MAIN' > /usr/bin/kiheo
 #!/bin/sh
@@ -985,12 +1116,34 @@ cat << 'EOF_KIHEO_MAIN' > /usr/bin/kiheo
 
 PLUGIN_DIR="/etc/kiheo/plugins"
 MODULE_DIR="/usr/lib/kiheo/modules"
+MENU_FLAG="/etc/kiheo/.menu_installed"
 
 mkdir -p "$PLUGIN_DIR" "$MODULE_DIR"
 [ -f "$MODULE_DIR/botnotif.sh" ] && . "$MODULE_DIR/botnotif.sh"
 
-if [ ! -f "$PLUGIN_DIR/contoh_bot.sh.example" ]; then
-    cat << 'EOF_EXAMPLE' > "$PLUGIN_DIR/contoh_bot.sh.example"
+install_menu_hub() {
+    clear
+    ui_banner
+    ui_panel_top "$CYAN" "$BGREEN" "[ Instalasi Menu Utama ]" "[ Instalasi Menu Utama ]"
+    ui_panel_line "$CYAN" "  Memasang struktur Menu Utama KIHEO-BOT...         " "  ${WHITE}Memasang struktur Menu Utama KIHEO-BOT...${NC}         "
+    ui_panel_bot "$CYAN"
+    printf "\n"
+
+    local current=0 width=25
+    while [ $current -le 100 ]; do
+        local filled=$(( current * width / 100 ))
+        local empty=$(( width - filled ))
+        local bar=""
+        local i=0; while [ $i -lt $filled ]; do bar="${bar}#"; i=$((i + 1)); done
+        local i=0; while [ $i -lt $empty ]; do bar="${bar}-"; i=$((i + 1)); done
+        printf "\r  ${YELLOW}[%s] %3d%% - %-32s${NC}" "$bar" "$current" "Menyiapkan Menu KIHEO-BOT..."
+        current=$((current + 20))
+        sleep 0.08
+    done
+
+    mkdir -p "$PLUGIN_DIR" "$MODULE_DIR"
+    if [ ! -f "$PLUGIN_DIR/contoh_bot.sh.example" ]; then
+        cat << 'EOF_EXAMPLE' > "$PLUGIN_DIR/contoh_bot.sh.example"
 #!/bin/sh
 # MENU_NAME: Bot Proyek Baru (Contoh)
 # Ubah ekstensi file ini dari .sh.example menjadi .sh agar otomatis muncul di menu 'kiheo'
@@ -1000,7 +1153,11 @@ ui_panel_top "$CYAN" "$BGREEN" "[ Bot Proyek Baru ]" "[ Bot Proyek Baru ]"
 ui_panel_line "$CYAN" "  Proyek bot baru berhasil dijalankan!              " "  ${WHITE}Proyek bot baru berhasil dijalankan!${NC}              "
 ui_panel_bot "$CYAN"
 EOF_EXAMPLE
-fi
+    fi
+    touch "$MENU_FLAG"
+    printf "\n\n  ${BGREEN}✔ Menu Utama KIHEO-BOT berhasil dipasang!${NC}\n"
+    sleep 1
+}
 
 uninstall_kiheo_hub() {
     printf "\n${BRED}Hapus KIHEO-BOT Hub beserta seluruh modulnya? [y/N]: ${NC}"
@@ -1022,13 +1179,66 @@ uninstall_kiheo_hub() {
     esac
 }
 
+bn_is_installed && touch "$MENU_FLAG"
+
 while true; do
     HOSTNAME_SYS="$(uci get system.@system[0].hostname 2>/dev/null || uname -n)"
     LAN_IP="$(uci get network.lan.ipaddr 2>/dev/null || echo "192.168.1.1")"
     LOCAL_TIME_SYS="$(ui_get_localtime)"
     UPTIME_SYS="$(ui_get_uptime)"
 
-    if [ -x /usr/bin/telenotif ] && [ -f /etc/telenotif.conf ]; then
+    PLUGIN_COUNT=0
+    for f in "$PLUGIN_DIR"/*.sh; do
+        [ -f "$f" ] && PLUGIN_COUNT=$((PLUGIN_COUNT + 1))
+    done
+
+    # TAHAP 1: Menu belum dipasang -> 1. Install Menu & 0. Kembali
+    if [ ! -f "$MENU_FLAG" ] && ! bn_is_installed && [ "$PLUGIN_COUNT" -eq 0 ]; then
+        clear
+        ui_banner
+
+        ui_panel_top "$CYAN" "$BGREEN" "[ Informasi Sistem ]" "[ Informasi Sistem ]"
+        ui_panel_kv "$CYAN" "Host" "${HOSTNAME_SYS} (${LAN_IP})" "${WHITE}${HOSTNAME_SYS}${NC} ${GRAY}(${LAN_IP})${NC}"
+        ui_panel_kv "$CYAN" "Local Time" "${LOCAL_TIME_SYS}" "${WHITE}${LOCAL_TIME_SYS}${NC}"
+        ui_panel_kv "$CYAN" "Uptime" "${UPTIME_SYS}" "${WHITE}${UPTIME_SYS}${NC}"
+        ui_panel_kv "$CYAN" "Status Menu" "BELUM TERPASANG" "${BRED}BELUM TERPASANG${NC}"
+        ui_panel_bot "$CYAN"
+
+        printf "\n"
+
+        ui_panel_top "$BRED" "$BGREEN" ". Menu Utama ." "• Menu Utama •"
+        ui_panel_line "$BRED" \
+            "  ID  Action                                        " \
+            "  ${BMAGENTA}ID  Action${NC}                                        "
+        ui_panel_line "$BRED" \
+            "   1  Install Menu KIHEO-BOT                        " \
+            "   ${BGREEN}1${NC}  ${WHITE}Install Menu KIHEO-BOT${NC}                        "
+        ui_panel_line "$BRED" \
+            "   0  Kembali                                       " \
+            "   ${BGREEN}0${NC}  ${WHITE}Kembali${NC}                                       "
+        ui_panel_bot "$BRED"
+
+        printf "\n${WHITE}Pilih menu: ${NC}"
+        read CHOICE
+
+        case "$CHOICE" in
+            1|i|I)
+                install_menu_hub
+                ;;
+            0|00|q|Q|exit)
+                printf "\n${CYAN}Kembali ke terminal. Ketik 'kiheo' untuk membuka lagi.${NC}\n"
+                exit 0
+                ;;
+            *)
+                printf "\n${BRED}Pilihan tidak valid! Ketik 1 untuk Install Menu atau 0 untuk Kembali.${NC}\n"
+                sleep 1
+                ;;
+        esac
+        continue
+    fi
+
+    # TAHAP 2: Menu Utama lengkap
+    if bn_is_installed; then
         if [ -n "$(ui_get_bot_pid)" ]; then
             NOTIF_ST_PLAIN="* AKTIF (Running)"
             NOTIF_ST_COLOR="${BGREEN}● AKTIF${NC} ${GRAY}(Running)${NC}"
@@ -1047,15 +1257,9 @@ while true; do
         NOTIF_MENU_COLOR="   ${BGREEN}1${NC}  ${WHITE}Bot Notif Telegram${NC} ${CYAN}[Install]${NC}"
     fi
 
-    PLUGIN_COUNT=0
-    for f in "$PLUGIN_DIR"/*.sh; do
-        [ -f "$f" ] && PLUGIN_COUNT=$((PLUGIN_COUNT + 1))
-    done
-
     clear
     ui_banner
 
-    # Kotak 1: Informasi Sistem (Rounded Cyan Border, Green Title)
     ui_panel_top "$CYAN" "$BGREEN" "[ Informasi Sistem ]" "[ Informasi Sistem ]"
     ui_panel_kv "$CYAN" "Host" "${HOSTNAME_SYS} (${LAN_IP})" "${WHITE}${HOSTNAME_SYS}${NC} ${GRAY}(${LAN_IP})${NC}"
     ui_panel_kv "$CYAN" "Local Time" "${LOCAL_TIME_SYS}" "${WHITE}${LOCAL_TIME_SYS}${NC}"
@@ -1067,7 +1271,6 @@ while true; do
 
     printf "\n"
 
-    # Kotak 2: Menu Utama (Rounded Bold Red Border, Green Title)
     ui_panel_top "$BRED" "$BGREEN" ". Menu Utama ." "• Menu Utama •"
     ui_panel_line "$BRED" \
         "  ID  Action                                        " \
@@ -1147,8 +1350,10 @@ done
 EOF_KIHEO_MAIN
 chmod +x /usr/bin/kiheo
 
-# Sinkronkan konfigurasi lama (jika ada) & restart bot notif otomatis
-if [ -x /usr/bin/telenotif ] && [ -f /etc/telenotif.conf ]; then
+# Jika konfigurasi lama sudah ada, perbarui binary daemon & restart otomatis tanpa ubah setting user
+if [ -f /etc/telenotif.conf ]; then
+    . /usr/lib/kiheo/modules/botnotif.sh
+    bn_create_binaries
     if grep -q '^WIFI_INACTIVE_MAX=' /etc/telenotif.conf; then
         sed -i 's|^WIFI_INACTIVE_MAX=.*|WIFI_INACTIVE_MAX="300000"|' /etc/telenotif.conf
     else
