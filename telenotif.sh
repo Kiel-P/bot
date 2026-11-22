@@ -3,6 +3,7 @@
 # ====================================================
 #   TELEGRAM NETWORK MONITOR & NOTIFIER BY. K I H E O
 #   Support: OpenWrt 21.02 - 25.12+ (opkg & apk)
+#   Mode: Real-Time (~10s) + Anti Wi-Fi Sleep False-Positive
 # ====================================================
 
 RED='\033[0;31m'
@@ -94,6 +95,24 @@ printf "Masukkan Interface LAN [Default: br-lan] : "
 read USER_IFACE
 [ -z "$USER_IFACE" ] && FALLBACK_IFACE="br-lan" || FALLBACK_IFACE="$USER_IFACE"
 
+printf "Batas Gagal Probe Berturut-turut [Default: 4] : "
+read USER_MAX_MISSES
+case "$USER_MAX_MISSES" in
+    ''|*[!0-9]*) MAX_MISSES=4 ;;
+    0) MAX_MISSES=4 ;;
+    *) MAX_MISSES="$USER_MAX_MISSES" ;;
+esac
+
+printf "Interval Pengecekan dalam Detik [Default: 2] : "
+read USER_INTERVAL
+case "$USER_INTERVAL" in
+    ''|*[!0-9]*) PROBE_INTERVAL=2 ;;
+    0) PROBE_INTERVAL=2 ;;
+    *) PROBE_INTERVAL="$USER_INTERVAL" ;;
+esac
+
+# Toleransi diam Wi-Fi sebelum dibangunkan paksa dengan probe ARP (20000 ms = 20 detik)
+WIFI_INACTIVE_MAX=20000
 INSTALL_TIME=$(date +"%d-%m-%Y %H:%M:%S")
 
 cat << EOF > /etc/telenotif.conf
@@ -101,6 +120,9 @@ TELEGRAM_TOKEN="${USER_TOKEN}"
 CHAT_ID="${USER_CHAT_ID}"
 ROUTER_NAME="${ROUTER_NAME}"
 FALLBACK_IFACE="${FALLBACK_IFACE}"
+MAX_MISSES="${MAX_MISSES}"
+PROBE_INTERVAL="${PROBE_INTERVAL}"
+WIFI_INACTIVE_MAX="${WIFI_INACTIVE_MAX}"
 INSTALL_TIME="${INSTALL_TIME}"
 EOF
 
@@ -114,17 +136,26 @@ cat << 'EOF' > /usr/bin/telenotif
 
 [ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
 
+: "${MAX_MISSES:=4}"
+: "${PROBE_INTERVAL:=2}"
+: "${WIFI_INACTIVE_MAX:=20000}"
+: "${FALLBACK_IFACE:=br-lan}"
+
 STATE_FILE="/tmp/telenotif_state.txt"
 CURRENT_FILE="/tmp/telenotif_current.txt"
 CANDIDATE_FILE="/tmp/telenotif_candidates.txt"
+WIFI_ASSOC_FILE="/tmp/telenotif_wifi_assoc.txt"
 CHILLI_TEMP="/tmp/chilli_raw.txt"
 ALIAS_FILE="/etc/config/host_alias.conf"
 
 touch "$STATE_FILE"
 
 ARPING_FLAG="-w"
+ARPING_FAST=""
 if command -v arping >/dev/null 2>&1; then
-    (arping -h 2>&1; arping --help 2>&1) | grep -q -- "-W " && ARPING_FLAG="-W"
+    ARPING_HELP=$(arping -h 2>&1; arping --help 2>&1)
+    printf '%s' "$ARPING_HELP" | grep -q -- "-W" && ARPING_FLAG="-W"
+    printf '%s' "$ARPING_HELP" | grep -q -- "-f" && ARPING_FAST="-f"
 fi
 
 WAN_IFACE=$(ip -4 route show default 2>/dev/null | awk '{print $5}' | head -n1)
@@ -142,7 +173,7 @@ send_telegram() {
         -d "chat_id=${CHAT_ID}" \
         --data-urlencode "text=$1" \
         -d "parse_mode=HTML" >/dev/null 2>&1 &
-    sleep 0.2
+    sleep 0.15
 }
 
 get_device_name() {
@@ -157,19 +188,104 @@ get_device_name() {
     fi
 }
 
+# Kumpulkan daftar MAC klien Wi-Fi yang masih terasosiasi & belum melewati batas diam
+refresh_wifi_clients() {
+    > "$WIFI_ASSOC_FILE"
+
+    # Metode 1: iw station dump (standar mac80211 OpenWrt)
+    if command -v iw >/dev/null 2>&1; then
+        for dev_path in /sys/class/net/*; do
+            [ -e "$dev_path/wireless" ] || [ -e "$dev_path/phy80211" ] || continue
+            wdev=$(basename "$dev_path")
+            iw dev "$wdev" station dump 2>/dev/null | awk -v max_ms="$WIFI_INACTIVE_MAX" '
+                /^Station / {
+                    mac = tolower($2)
+                    inact = 0
+                    auth = "yes"
+                }
+                /inactive time:/ {
+                    inact = $3 + 0
+                }
+                /authorized:/ {
+                    auth = $2
+                }
+                /^$/ {
+                    if (mac != "" && auth == "yes" && inact <= max_ms) {
+                        print mac
+                    }
+                    mac = ""
+                }
+                END {
+                    if (mac != "" && auth == "yes" && inact <= max_ms) {
+                        print mac
+                    }
+                }
+            ' >> "$WIFI_ASSOC_FILE"
+        done
+    fi
+
+    # Metode 2: iwinfo assoclist (fallback driver non-mac80211)
+    if [ ! -s "$WIFI_ASSOC_FILE" ] && command -v iwinfo >/dev/null 2>&1; then
+        for dev_path in /sys/class/net/*; do
+            [ -e "$dev_path/wireless" ] || [ -e "$dev_path/phy80211" ] || continue
+            wdev=$(basename "$dev_path")
+            iwinfo "$wdev" assoclist 2>/dev/null | awk -v max_ms="$WIFI_INACTIVE_MAX" '
+                $1 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ {
+                    mac = tolower($1)
+                    inact = 0
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == "ms" && $(i+1) == "ago") {
+                            inact = $(i-1) + 0
+                        }
+                    }
+                    if (inact <= max_ms) print mac
+                }
+            ' >> "$WIFI_ASSOC_FILE"
+        done
+    fi
+
+    # Metode 3: ubus hostapd get_clients
+    if [ ! -s "$WIFI_ASSOC_FILE" ] && command -v ubus >/dev/null 2>&1; then
+        for hapd in $(ubus list 'hostapd.*' 2>/dev/null); do
+            ubus call "$hapd" get_clients 2>/dev/null | \
+                grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' | \
+                tr '[:upper:]' '[:lower:]' >> "$WIFI_ASSOC_FILE"
+        done
+    fi
+
+    if [ -s "$WIFI_ASSOC_FILE" ]; then
+        sort -u "$WIFI_ASSOC_FILE" -o "$WIFI_ASSOC_FILE" 2>/dev/null
+    fi
+}
+
+is_wifi_connected() {
+    local mac="$1"
+    [ -s "$WIFI_ASSOC_FILE" ] && grep -q -F -x "$mac" "$WIFI_ASSOC_FILE"
+}
+
+get_prev_miss_count() {
+    local mac="$1"
+    awk -F'|' -v m="$mac" 'tolower($1)==m {print ($5=="" ? 0 : $5); exit}' "$STATE_FILE" 2>/dev/null
+}
+
+# Probe cepat berprioritas ARP Layer-2 (langsung keluar saat 1 balasan masuk)
 probe_device() {
     local target_ip="$1"
     local target_iface="${2:-$FALLBACK_IFACE}"
+    local prev_misses="${3:-0}"
     [ -z "$target_ip" ] && return 1
+
+    local arp_count=1
+    [ "$prev_misses" -gt 0 ] 2>/dev/null && arp_count=2
+
+    if command -v arping >/dev/null 2>&1; then
+        if arping ${ARPING_FAST} -c "$arp_count" ${ARPING_FLAG} 1 -I "$target_iface" "$target_ip" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
 
     if ping -c 1 -W 1 "$target_ip" >/dev/null 2>&1; then
         return 0
-    fi
-
-    if command -v arping >/dev/null 2>&1; then
-        if arping -c 1 ${ARPING_FLAG} 1 -I "$target_iface" "$target_ip" >/dev/null 2>&1; then
-            return 0
-        fi
     fi
 
     return 1
@@ -189,7 +305,7 @@ SAFE_ROUTER=$(escape_html "$ROUTER_NAME")
 
 send_telegram "🤖 <b>Bot Notifikasi Berhasil Aktif!</b>
 Sistem siap memantau jaringan <b>${SAFE_ROUTER}</b>
-Mode Deteksi: Active Probe (LAN + Chilli)
+Mode Deteksi: Real-Time Wi-Fi Assoc + Multi-Probe (${MAX_MISSES}x / ${PROBE_INTERVAL}s)
 ⏱️ Aktif pada: $(date +"%d-%m-%Y %H:%M:%S")
 ===========================
                  By. K I H E O"
@@ -198,6 +314,9 @@ while true; do
     > "$CANDIDATE_FILE"
     > "$CURRENT_FILE"
     > "$CHILLI_TEMP"
+
+    # Perbarui daftar klien Wi-Fi aktif di AP lokal
+    refresh_wifi_clients
 
     # 1. Kandidat dari CoovaChilli (jika tersedia)
     if command -v chilli_query >/dev/null 2>&1; then
@@ -242,7 +361,17 @@ while true; do
             chilli:*) probe_iface="$FALLBACK_IFACE" ;;
         esac
 
-        if probe_device "$ip" "$probe_iface"; then
+        prev_misses=$(get_prev_miss_count "$mac")
+        [ -z "$prev_misses" ] && prev_misses=0
+
+        device_alive=0
+        if is_wifi_connected "$mac"; then
+            device_alive=1
+        elif probe_device "$ip" "$probe_iface" "$prev_misses"; then
+            device_alive=1
+        fi
+
+        if [ "$device_alive" -eq 1 ]; then
             hostname=$(awk -v m="$mac" 'tolower($2)==m {print $4}' /tmp/dhcp.leases 2>/dev/null | head -n1)
             if [ -n "$chilli_user" ] && [ "$chilli_user" != "-" ]; then
                 DISPLAY_NAME="$chilli_user"
@@ -268,7 +397,7 @@ while true; do
         fi
     done
 
-    # 5. Deteksi perangkat terputus (2x gagal probe berturut-turut)
+    # 5. Deteksi perangkat terputus (wajib gagal MAX_MISSES kali berturut-turut)
     if [ -f "$STATE_FILE" ]; then
         TEMP_STATE="/tmp/telenotif_temp.txt"
         > "$TEMP_STATE"
@@ -276,11 +405,15 @@ while true; do
             [ -z "$mac" ] && continue
             [ -z "$miss_count" ] && miss_count=0
 
-            if grep -q -i "^${mac}|" "$CURRENT_FILE"; then
-                printf '%s|%s|%s|%s|0\n' "$mac" "$ip" "$iface" "$display_name" >> "$TEMP_STATE"
+            active_line=$(grep -i "^${mac}|" "$CURRENT_FILE" | head -n1)
+            if [ -n "$active_line" ]; then
+                cur_ip=$(printf '%s' "$active_line" | awk -F'|' '{print $2}')
+                cur_iface=$(printf '%s' "$active_line" | awk -F'|' '{print $3}')
+                cur_name=$(printf '%s' "$active_line" | awk -F'|' '{print $4}')
+                printf '%s|%s|%s|%s|0\n' "$mac" "${cur_ip:-$ip}" "${cur_iface:-$iface}" "${cur_name:-$display_name}" >> "$TEMP_STATE"
             else
                 miss_count=$((miss_count + 1))
-                if [ $miss_count -ge 2 ]; then
+                if [ "$miss_count" -ge "$MAX_MISSES" ]; then
                     ip neigh del "$ip" dev "$iface" >/dev/null 2>&1
                     SAFE_NAME=$(escape_html "$display_name")
                     MSG="🔻 <b>Perangkat Terputus!</b>
@@ -288,8 +421,8 @@ while true; do
 📱 Host: ${SAFE_NAME}
 🌐 IP: ${ip}
 🏷️ MAC: ${mac}
-========================
-              By. K I H E O"
+===========================
+                 By. K I H E O"
                     send_telegram "$MSG"
                 else
                     printf '%s|%s|%s|%s|%s\n' "$mac" "$ip" "$iface" "$display_name" "$miss_count" >> "$TEMP_STATE"
@@ -299,7 +432,7 @@ while true; do
         mv "$TEMP_STATE" "$STATE_FILE"
     fi
 
-    sleep 2
+    sleep "$PROBE_INTERVAL"
 done
 EOF
 
@@ -308,17 +441,25 @@ chmod +x /usr/bin/telenotif
 # 4. Membuat Utilitas Status & Uninstall
 cat << 'EOF' > /usr/bin/telenotif-status
 #!/bin/sh
+[ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
+: "${MAX_MISSES:=4}"
+
 echo "=== STATUS BOT TELENOTIF ==="
 PIDS=$(pgrep -f "/usr/bin/telenotif")
 if [ -n "$PIDS" ]; then
-    echo "Status Proses : AKTIF (PID: $PIDS)"
+    echo "Status Proses  : AKTIF (PID: $PIDS)"
+    echo "Ambang Putus   : ${MAX_MISSES}x gagal berturut-turut (Interval: ${PROBE_INTERVAL:-2}s)"
 else
-    echo "Status Proses : MATI"
+    echo "Status Proses  : MATI"
 fi
 echo ""
 echo "=== PERANGKAT TERDETEKSI SAAT INI ==="
 if [ -s /tmp/telenotif_state.txt ]; then
-    cat /tmp/telenotif_state.txt
+    awk -F'|' -v max="$MAX_MISSES" '{
+        miss = ($5 == "" ? 0 : $5)
+        status = (miss == 0 ? "ONLINE" : "CEK ULANG (" miss "/" max ")")
+        printf "%-17s | %-15s | %-20s | %s\n", $1, $2, $4, status
+    }' /tmp/telenotif_state.txt
 else
     echo "(Kosong - belum ada perangkat aktif)"
 fi
