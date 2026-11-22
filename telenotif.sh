@@ -4,6 +4,7 @@
 #   KIHEO-BOT HUB INSTALLER (UNIFIED CYBER PANEL UI)
 #   Command Utama: kiheo
 #   Support: OpenWrt 21.02 - 25.12+ (opkg & apk)
+#   Anti-Spam: Wi-Fi Assoc Dump + Multi-Probe + Lock
 # ====================================================
 
 CYAN='\033[0;36m'
@@ -57,7 +58,6 @@ ui_banner() {
 }
 
 # Header kotak rounded lebar total 54 kolom (inner = 52)
-# Argumen: $1=border_color, $2=title_color, $3=title_ascii_len, $4=title_display
 ui_panel_top() {
     local bcolor="$1"
     local tcolor="$2"
@@ -71,8 +71,7 @@ ui_panel_top() {
         "$(ui_repeat "─" "$left")" "$title_disp" "$(ui_repeat "─" "$right")"
 }
 
-# Baris kotak rounded lebar inner 52 kolom
-# Catatan: $2 (plain) harus ASCII murni 1-byte agar lebar kolom 100% presisi
+# Baris kotak rounded lebar inner 52 kolom ($2 harus ASCII murni 1-byte)
 ui_panel_line() {
     local bcolor="$1"
     local plain="$2"
@@ -125,6 +124,18 @@ ui_get_localtime() {
     esac
     printf '%s' "$raw"
 }
+
+ui_get_bot_pid() {
+    if [ -f /var/run/telenotif.pid ]; then
+        local p
+        p="$(cat /var/run/telenotif.pid 2>/dev/null)"
+        if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+            printf '%s' "$p"
+            return 0
+        fi
+    fi
+    pgrep -f "/usr/bin/telenotif" 2>/dev/null | head -n1
+}
 EOF_UI
 chmod +x /usr/lib/kiheo/ui.sh
 
@@ -134,11 +145,21 @@ chmod +x /usr/lib/kiheo/ui.sh
 cat << 'EOF_DAEMON' > /usr/bin/telenotif
 #!/bin/sh
 
+PID_FILE="/var/run/telenotif.pid"
+if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        exit 0
+    fi
+fi
+echo "$$" > "$PID_FILE"
+trap 'rm -f "$PID_FILE"; exit 0' INT TERM EXIT
+
 [ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
 
 : "${MAX_MISSES:=4}"
 : "${PROBE_INTERVAL:=2}"
-: "${WIFI_INACTIVE_MAX:=20000}"
+: "${WIFI_INACTIVE_MAX:=300000}"
 : "${FALLBACK_IFACE:=br-lan}"
 
 STATE_FILE="/tmp/telenotif_state.txt"
@@ -197,25 +218,29 @@ get_device_name() {
 refresh_wifi_clients() {
     > "$WIFI_ASSOC_FILE"
 
+    # Metode 1: iw station dump (flush setiap baris ^Station agar semua klien terbaca)
     if command -v iw >/dev/null 2>&1; then
         for dev_path in /sys/class/net/*; do
             [ -e "$dev_path/wireless" ] || [ -e "$dev_path/phy80211" ] || continue
             wdev=$(basename "$dev_path")
             iw dev "$wdev" station dump 2>/dev/null | awk -v max_ms="$WIFI_INACTIVE_MAX" '
-                /^Station / { mac = tolower($2); inact = 0; auth = "yes" }
+                function flush() {
+                    if (mac != "" && auth == "yes" && inact <= max_ms) print mac
+                }
+                /^Station / {
+                    flush()
+                    mac = tolower($2)
+                    inact = 0
+                    auth = "yes"
+                }
                 /inactive time:/ { inact = $3 + 0 }
                 /authorized:/ { auth = $2 }
-                /^$/ {
-                    if (mac != "" && auth == "yes" && inact <= max_ms) print mac
-                    mac = ""
-                }
-                END {
-                    if (mac != "" && auth == "yes" && inact <= max_ms) print mac
-                }
+                END { flush() }
             ' >> "$WIFI_ASSOC_FILE"
         done
     fi
 
+    # Metode 2: iwinfo assoclist (fallback driver non-mac80211)
     if [ ! -s "$WIFI_ASSOC_FILE" ] && command -v iwinfo >/dev/null 2>&1; then
         for dev_path in /sys/class/net/*; do
             [ -e "$dev_path/wireless" ] || [ -e "$dev_path/phy80211" ] || continue
@@ -232,6 +257,7 @@ refresh_wifi_clients() {
         done
     fi
 
+    # Metode 3: ubus hostapd get_clients
     if [ ! -s "$WIFI_ASSOC_FILE" ] && command -v ubus >/dev/null 2>&1; then
         for hapd in $(ubus list 'hostapd.*' 2>/dev/null); do
             ubus call "$hapd" get_clients 2>/dev/null | \
@@ -422,7 +448,7 @@ cat << 'EOF_RES' > /usr/bin/resbotnotif
 for pid in $(pgrep -f "/usr/bin/telenotif"); do
     kill -9 "$pid" 2>/dev/null
 done
-rm -f /tmp/telenotif_current.txt /tmp/telenotif_candidates.txt /tmp/telenotif_wifi_assoc.txt /tmp/chilli_raw.txt
+rm -f /var/run/telenotif.pid /tmp/telenotif_current.txt /tmp/telenotif_candidates.txt /tmp/telenotif_wifi_assoc.txt /tmp/chilli_raw.txt
 
 if [ -f /etc/init.d/telenotif ]; then
     /etc/init.d/telenotif enable >/dev/null 2>&1
@@ -432,7 +458,7 @@ else
 fi
 
 sleep 1
-PIDS="$(pgrep -f "/usr/bin/telenotif" | tr '\n' ' ' | sed 's/ $//')"
+PIDS="$(ui_get_bot_pid)"
 
 ui_panel_top "$CYAN" "$BGREEN" "[ Kontrol Bot Notif ]" "[ Kontrol Bot Notif ]"
 if [ -n "$PIDS" ]; then
@@ -455,7 +481,7 @@ cat << 'EOF_STOP' > /usr/bin/stopbotnotif
 for pid in $(pgrep -f "/usr/bin/telenotif"); do
     kill -9 "$pid" 2>/dev/null
 done
-rm -f /tmp/telenotif_current.txt /tmp/telenotif_candidates.txt /tmp/telenotif_wifi_assoc.txt /tmp/chilli_raw.txt
+rm -f /var/run/telenotif.pid /tmp/telenotif_current.txt /tmp/telenotif_candidates.txt /tmp/telenotif_wifi_assoc.txt /tmp/chilli_raw.txt
 
 ui_panel_top "$CYAN" "$BGREEN" "[ Kontrol Bot Notif ]" "[ Kontrol Bot Notif ]"
 ui_panel_kv "$CYAN" "Aksi" "Stop / Matikan Bot" "${WHITE}Stop / Matikan Bot${NC}"
@@ -473,7 +499,7 @@ cat << 'EOF_CEK' > /usr/bin/cekbot
 : "${MAX_MISSES:=4}"
 : "${PROBE_INTERVAL:=2}"
 
-PIDS="$(pgrep -f "/usr/bin/telenotif" | tr '\n' ' ' | sed 's/ $//')"
+PIDS="$(ui_get_bot_pid)"
 NOW_TIME="$(ui_get_localtime)"
 
 ui_panel_top "$CYAN" "$BGREEN" "[ Status Bot Notifikasi ]" "[ Status Bot Notifikasi ]"
@@ -647,7 +673,7 @@ bn_install() {
         *) PROBE_INTERVAL="$USER_INTERVAL" ;;
     esac
 
-    WIFI_INACTIVE_MAX=20000
+    WIFI_INACTIVE_MAX=300000
     INSTALL_TIME="$(ui_get_localtime)"
 
     cat << EOF_CONF > "$CONF_FILE"
@@ -690,7 +716,7 @@ bn_uninstall_only() {
     for pid in $(pgrep -f "/usr/bin/telenotif"); do
         kill -9 "$pid" 2>/dev/null
     done
-    rm -f "$CONF_FILE" /tmp/telenotif_*.txt /tmp/chilli_raw.txt
+    rm -f /var/run/telenotif.pid "$CONF_FILE" /tmp/telenotif_*.txt /tmp/chilli_raw.txt
     printf "\n"
     ui_panel_top "$CYAN" "$BGREEN" "[ Uninstall Bot Notif ]" "[ Uninstall Bot Notif ]"
     ui_panel_line "$CYAN" "  Konfigurasi & layanan Bot Notif telah dihapus.    " "  ${BGREEN}✔ Konfigurasi & layanan Bot Notif dihapus.${NC}    "
@@ -772,7 +798,7 @@ bn_manage_user_ids() {
                                     -d "parse_mode=HTML" >/dev/null 2>&1 &
                             fi
 
-                            if pgrep -f "/usr/bin/telenotif" >/dev/null 2>&1; then
+                            if [ -n "$(ui_get_bot_pid)" ]; then
                                 /usr/bin/resbotnotif >/dev/null 2>&1
                             fi
                             sleep 1
@@ -798,7 +824,7 @@ bn_manage_user_ids() {
                 if [ "$found" -eq 1 ]; then
                     sed -i "s|^CHAT_ID=.*|CHAT_ID=\"${new_list}\"|" "$CONF_FILE"
                     printf "${BGREEN}✔ User ID %s berhasil dihapus!${NC}\n" "$del_uid"
-                    pgrep -f "/usr/bin/telenotif" >/dev/null 2>&1 && /usr/bin/resbotnotif >/dev/null 2>&1
+                    [ -n "$(ui_get_bot_pid)" ] && /usr/bin/resbotnotif >/dev/null 2>&1
                 else
                     printf "${BRED}✖ User ID %s tidak ditemukan.${NC}\n" "$del_uid"
                 fi
@@ -846,7 +872,7 @@ botnotif_menu() {
             esac
         else
             . "$CONF_FILE"
-            local pids="$(pgrep -f "/usr/bin/telenotif" | tr '\n' ' ' | sed 's/ $//')"
+            local pids="$(ui_get_bot_pid)"
             local st_plain st_color
             if [ -n "$pids" ]; then
                 st_plain="* AKTIF (PID: ${pids})"
@@ -989,7 +1015,7 @@ uninstall_kiheo_hub() {
             rm -rf /usr/lib/kiheo /etc/kiheo /usr/bin/kiheo \
                    /usr/bin/telenotif /usr/bin/telenotif-status /usr/bin/cekbot \
                    /usr/bin/resbotnotif /usr/bin/stopbotnotif /etc/telenotif.conf \
-                   /tmp/telenotif_*.txt /tmp/chilli_raw.txt
+                   /var/run/telenotif.pid /tmp/telenotif_*.txt /tmp/chilli_raw.txt
             printf "${BGREEN}✔ KIHEO-BOT Hub berhasil dihapus total.${NC}\n"
             exit 0
             ;;
@@ -1003,7 +1029,7 @@ while true; do
     UPTIME_SYS="$(ui_get_uptime)"
 
     if [ -x /usr/bin/telenotif ] && [ -f /etc/telenotif.conf ]; then
-        if pgrep -f "/usr/bin/telenotif" >/dev/null 2>&1; then
+        if [ -n "$(ui_get_bot_pid)" ]; then
             NOTIF_ST_PLAIN="* AKTIF (Running)"
             NOTIF_ST_COLOR="${BGREEN}● AKTIF${NC} ${GRAY}(Running)${NC}"
             NOTIF_MENU_PLAIN="   1  Bot Notif Telegram [AKTIF]"
@@ -1121,8 +1147,13 @@ done
 EOF_KIHEO_MAIN
 chmod +x /usr/bin/kiheo
 
-# Restart bot notif otomatis jika sebelumnya sudah terpasang
+# Sinkronkan konfigurasi lama (jika ada) & restart bot notif otomatis
 if [ -x /usr/bin/telenotif ] && [ -f /etc/telenotif.conf ]; then
+    if grep -q '^WIFI_INACTIVE_MAX=' /etc/telenotif.conf; then
+        sed -i 's|^WIFI_INACTIVE_MAX=.*|WIFI_INACTIVE_MAX="300000"|' /etc/telenotif.conf
+    else
+        echo 'WIFI_INACTIVE_MAX="300000"' >> /etc/telenotif.conf
+    fi
     /usr/bin/resbotnotif >/dev/null 2>&1
 fi
 
