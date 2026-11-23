@@ -2,7 +2,7 @@
 
 # ====================================================
 #   KIHEO-BOT HUB INSTALLER (UNIFIED CYBER PANEL UI)
-#   Command Utama: kiheo
+#   Command Utama: kiheo | cekbot | hostbot | blockbot
 #   Repo: https://github.com/kiel-p/bot
 #   Support: OpenWrt 21.02 - 25.12+ (opkg & apk)
 # ====================================================
@@ -46,6 +46,18 @@ ui_repeat() {
     printf '%s' "$out"
 }
 
+ui_max_inner() {
+    local cols=""
+    if command -v stty >/dev/null 2>&1; then
+        cols="$(stty size 2>/dev/null | awk '{print $2}')"
+    fi
+    [ -z "$cols" ] || [ "$cols" -eq 0 ] 2>/dev/null && cols="${COLUMNS:-54}"
+    case "$cols" in ''|*[!0-9]*) cols=54 ;; esac
+    [ "$cols" -lt 54 ] && cols=54
+    [ "$cols" -gt 70 ] && cols=70
+    echo $(( cols - 2 ))
+}
+
 ui_banner() {
     printf "${BCYAN}"
     printf "    ╔═╗ ╔═╗╔═╗╔═╗╔═╗╔═══╗╔═══╗    ╔═══╗╔═══╗╔═══╗\n"
@@ -57,7 +69,7 @@ ui_banner() {
     printf "${NC}\n"
 }
 
-# Header kotak rounded (lebar dinamis via $5, default inner = 52)
+# Header kotak rounded (default inner = 52)
 ui_panel_top() {
     local bcolor="$1"
     local tcolor="$2"
@@ -66,12 +78,14 @@ ui_panel_top() {
     local inner="${5:-52}"
     local tlen=$(( ${#title_ascii} + 2 ))
     local left=$(( (inner - tlen) / 2 ))
+    [ $left -lt 1 ] && left=1
     local right=$(( inner - tlen - left ))
+    [ $right -lt 1 ] && right=1
     printf "${bcolor}╭%s ${tcolor}%s${bcolor} %s╮${NC}\n" \
         "$(ui_repeat "─" "$left")" "$title_disp" "$(ui_repeat "─" "$right")"
 }
 
-# Baris kotak rounded ($2 harus ASCII murni 1-byte, $4 = lebar inner opsional)
+# Baris kotak rounded ($2 WAJIB ASCII murni 1-byte)
 ui_panel_line() {
     local bcolor="$1"
     local plain="$2"
@@ -83,7 +97,7 @@ ui_panel_line() {
     printf "${bcolor}│${NC}%b%s${bcolor}│${NC}\n" "$colored" "$(ui_repeat " " "$pad")"
 }
 
-# Baris Key-Value rata kanan pada titik dua (kolom ke-14)
+# Baris Key-Value rata kanan pada titik dua (kolom ke-14) + auto-wrap jika panjang
 ui_panel_kv() {
     local bcolor="$1"
     local key="$2"
@@ -94,7 +108,20 @@ ui_panel_kv() {
     [ $key_pad -lt 1 ] && key_pad=1
     local prefix_plain="$(ui_repeat " " "$key_pad")${key} : "
     local prefix_color="$(ui_repeat " " "$key_pad")${CYAN}${key}${NC} : "
-    ui_panel_line "$bcolor" "${prefix_plain}${val_plain}" "${prefix_color}${val_colored}" "$inner"
+    local max_val=$(( inner - 16 ))
+
+    if [ ${#val_plain} -le $max_val ]; then
+        ui_panel_line "$bcolor" "${prefix_plain}${val_plain}" "${prefix_color}${val_colored}" "$inner"
+    else
+        local first_chunk="$(printf '%s' "$val_plain" | cut -c1-"$max_val")"
+        ui_panel_line "$bcolor" "${prefix_plain}${first_chunk}" "${prefix_color}${BMAGENTA}${first_chunk}${NC}" "$inner"
+        local rest="$(printf '%s' "$val_plain" | cut -c$((max_val + 1))-)"
+        while [ -n "$rest" ]; do
+            local chunk="$(printf '%s' "$rest" | cut -c1-"$max_val")"
+            ui_panel_line "$bcolor" "                ${chunk}" "                ${BMAGENTA}${chunk}${NC}" "$inner"
+            rest="$(printf '%s' "$rest" | cut -c$((max_val + 1))-)"
+        done
+    fi
 }
 
 ui_panel_bot() {
@@ -180,11 +207,9 @@ cat << 'EOF_APPLY_BLOCK' > /etc/kiheo/apply_block.sh
 #!/bin/sh
 
 BLOCK_FILE="/etc/telenotif_blocked.conf"
-STATE_FILE="/tmp/telenotif_state.txt"
 
 [ -f "$BLOCK_FILE" ] || exit 0
 
-# Pastikan terpasang di UCI firewall include agar aktif otomatis saat reboot/reload
 if command -v uci >/dev/null 2>&1; then
     if [ "$(uci -q get firewall.kiheo_blk_inc)" != "include" ]; then
         uci set firewall.kiheo_blk_inc='include'
@@ -212,7 +237,6 @@ if command -v nft >/dev/null 2>&1; then
             nft add rule inet kiheo_block forward ether saddr "$mac" drop >/dev/null 2>&1
             nft add rule inet kiheo_block input ether saddr "$mac" drop >/dev/null 2>&1
 
-            # Cari IP terkini untuk memutus sesi aktif (conntrack & neighbor)
             cur_ip="$saved_ip"
             [ -z "$cur_ip" ] && [ -f /tmp/dhcp.leases ] && cur_ip="$(awk -v m="$mac" 'tolower($2)==m {print $3; exit}' /tmp/dhcp.leases 2>/dev/null)"
             [ -z "$cur_ip" ] && cur_ip="$(ip -4 neigh show 2>/dev/null | awk -v m="$mac" 'tolower($0) ~ m {print $1; exit}')"
@@ -225,7 +249,6 @@ if command -v nft >/dev/null 2>&1; then
                 ip neigh del "$cur_ip" dev br-lan >/dev/null 2>&1
             fi
 
-            # Putuskan koneksi Wi-Fi langsung jika terhubung ke radio router utama
             if command -v ubus >/dev/null 2>&1; then
                 for hapd in $(ubus list 'hostapd.*' 2>/dev/null); do
                     ubus call "$hapd" del_client "{\"addr\":\"${mac}\",\"reason\":5,\"deauth\":true,\"ban_time\":86400000}" >/dev/null 2>&1
@@ -234,7 +257,6 @@ if command -v nft >/dev/null 2>&1; then
         done < "$BLOCK_FILE"
     fi
 elif command -v iptables >/dev/null 2>&1; then
-    # 2. Fallback Legacy iptables (OpenWrt 21.02)
     iptables -D FORWARD -j KIHEO_BLOCK >/dev/null 2>&1
     iptables -D INPUT -j KIHEO_BLOCK >/dev/null 2>&1
     iptables -F KIHEO_BLOCK >/dev/null 2>&1
@@ -265,6 +287,9 @@ cat << 'EOF_MOD_NOTIF' > /usr/lib/kiheo/modules/botnotif.sh
 CONF_FILE="/etc/telenotif.conf"
 USERS_FILE="/etc/telenotif_users.conf"
 STATE_FILE="/tmp/telenotif_state.txt"
+ALIAS_FILE="/etc/config/host_alias.conf"
+BLOCK_FILE="/etc/telenotif_blocked.conf"
+IGNORE_FILE="/etc/telenotif.ignore"
 
 bn_progress() {
     local start=$1
@@ -344,6 +369,367 @@ bn_del_user_name() {
     local tmp_u="/tmp/telenotif_users.tmp"
     awk -F'|' -v id="$uid" '$1 != id' "$USERS_FILE" > "$tmp_u" 2>/dev/null
     mv "$tmp_u" "$USERS_FILE"
+}
+
+# Kotak Perangkat Terdeteksi: 1 baris per perangkat, otomatis menyesuaikan lebar layar & '...' jika berlebih
+bn_render_devices_box() {
+    local max_in="$(ui_max_inner)"
+    local w_ip=13
+    local longest_host=9
+
+    if [ -s "$STATE_FILE" ]; then
+        while IFS='|' read -r _ s_ip _ s_host _; do
+            [ ${#s_ip} -gt $w_ip ] && w_ip=${#s_ip}
+            [ ${#s_host} -gt $longest_host ] && longest_host=${#s_host}
+        done < "$STATE_FILE"
+    fi
+    [ $w_ip -gt 15 ] && w_ip=15
+
+    # Total inner = 1 + 2(No) + 1 + 17(MAC) + 1 + w_ip + 1 + w_host + 1 + 6(Status) = 30 + w_ip + w_host
+    local fixed_cols=$(( 30 + w_ip ))
+    local dev_inner=$(( fixed_cols + longest_host ))
+    [ $dev_inner -lt 52 ] && dev_inner=52
+    [ $dev_inner -gt $max_in ] && dev_inner=$max_in
+
+    local w_host=$(( dev_inner - fixed_cols ))
+    [ $w_host -lt 7 ] && w_host=7
+
+    local hdr_ip="$(printf "%-${w_ip}s" "IP Address")"
+    local hdr_host="$(printf "%-${w_host}s" "Host")"
+
+    ui_panel_top "$BRED" "$BGREEN" ". Perangkat Terdeteksi ." "• Perangkat Terdeteksi •" "$dev_inner"
+    ui_panel_line "$BRED" \
+        " No MAC Address       ${hdr_ip} ${hdr_host} Status" \
+        " ${BMAGENTA}No MAC Address       ${hdr_ip} ${hdr_host} Status${NC}" "$dev_inner"
+
+    if [ -s "$STATE_FILE" ]; then
+        local dev_idx=0
+        while IFS='|' read -r mac ip iface host miss; do
+            [ -z "$mac" ] && continue
+            [ -z "$miss" ] && miss=0
+            dev_idx=$((dev_idx + 1))
+            local no_f="$(printf '%2d' "$dev_idx")"
+            local mac_f="$(printf '%-17s' "$mac")"
+            local ip_f="$(printf "%-${w_ip}s" "$ip")"
+
+            local host_disp="$host"
+            if [ ${#host} -gt $w_host ]; then
+                local cut_len=$(( w_host - 3 ))
+                [ $cut_len -lt 4 ] && cut_len=4
+                host_disp="$(printf '%s' "$host" | cut -c1-"$cut_len")..."
+            fi
+            local host_f="$(printf "%-${w_host}s" "$host_disp")"
+
+            local st_plain st_color
+            if [ "$miss" -eq 0 ]; then
+                st_plain="ONLINE"
+                st_color="${BGREEN}ONLINE${NC}"
+            else
+                st_plain="$(printf 'RTRY %s' "$miss" | cut -c1-6)"
+                st_plain="$(printf '%-6s' "$st_plain")"
+                st_color="${YELLOW}${st_plain}${NC}"
+            fi
+
+            local row_plain=" ${no_f} ${mac_f} ${ip_f} ${host_f} ${st_plain}"
+            local row_color=" ${BGREEN}${no_f}${NC} ${WHITE}${mac_f}${NC} ${CYAN}${ip_f}${NC} ${WHITE}${host_f}${NC} ${st_color}"
+            ui_panel_line "$BRED" "$row_plain" "$row_color" "$dev_inner"
+        done < "$STATE_FILE"
+    else
+        ui_panel_line "$BRED" \
+            "   (Belum ada perangkat aktif yang terdeteksi)" \
+            "   ${GRAY}(Belum ada perangkat aktif yang terdeteksi)${NC}" "$dev_inner"
+    fi
+    ui_panel_bot "$BRED" "$dev_inner"
+}
+
+bn_add_block_entry() {
+    local mac="$(printf '%s' "$1" | tr '-' ':' | tr '[:upper:]' '[:lower:]' | tr -d ' \r\n')"
+    local host="${2:-Perangkat Diblokir}"
+    local ip="$(printf '%s' "$3" | tr -d ' \r\n')"
+    local hex="$(printf '%s' "$mac" | tr -d ':')"
+
+    touch "$BLOCK_FILE" "$IGNORE_FILE"
+    awk -F'|' -v m="$mac" 'tolower($1) != m' "$BLOCK_FILE" > /tmp/telenotif_blk.tmp 2>/dev/null
+    printf '%s|%s|%s\n' "$mac" "$host" "$ip" >> /tmp/telenotif_blk.tmp
+    mv /tmp/telenotif_blk.tmp "$BLOCK_FILE"
+
+    grep -qi "^${mac}$" "$IGNORE_FILE" || printf '%s\n' "$mac" >> "$IGNORE_FILE"
+
+    if command -v uci >/dev/null 2>&1; then
+        uci -q delete "firewall.kiheo_blk_${hex}" >/dev/null 2>&1
+        uci set "firewall.kiheo_blk_${hex}=rule"
+        uci set "firewall.kiheo_blk_${hex}.name=KIHEO_BLOCK_${hex}"
+        uci set "firewall.kiheo_blk_${hex}.src=lan"
+        uci set "firewall.kiheo_blk_${hex}.src_mac=${mac}"
+        uci set "firewall.kiheo_blk_${hex}.target=DROP"
+    fi
+
+    if [ -f "$STATE_FILE" ]; then
+        awk -F'|' -v m="$mac" 'tolower($1) != m' "$STATE_FILE" > /tmp/telenotif_st_blk.tmp 2>/dev/null
+        mv /tmp/telenotif_st_blk.tmp "$STATE_FILE"
+    fi
+}
+
+bn_del_block_entry() {
+    local mac="$(printf '%s' "$1" | tr '-' ':' | tr '[:upper:]' '[:lower:]' | tr -d ' \r\n')"
+    local hex="$(printf '%s' "$mac" | tr -d ':')"
+
+    touch "$BLOCK_FILE" "$IGNORE_FILE"
+    awk -F'|' -v m="$mac" 'tolower($1) != m' "$BLOCK_FILE" > /tmp/telenotif_blk.tmp 2>/dev/null
+    mv /tmp/telenotif_blk.tmp "$BLOCK_FILE"
+
+    grep -vi "^${mac}$" "$IGNORE_FILE" > /tmp/telenotif_ign.tmp 2>/dev/null
+    mv /tmp/telenotif_ign.tmp "$IGNORE_FILE"
+
+    if command -v uci >/dev/null 2>&1; then
+        uci -q delete "firewall.kiheo_blk_${hex}" >/dev/null 2>&1
+    fi
+}
+
+bn_sync_firewall() {
+    command -v uci >/dev/null 2>&1 && uci commit firewall >/dev/null 2>&1
+    [ -x /etc/kiheo/apply_block.sh ] && /etc/kiheo/apply_block.sh >/dev/null 2>&1
+}
+
+# Fitur Langsung 1: Ganti Nama Host (command: hostbot)
+bn_rename_host_screen() {
+    touch "$ALIAS_FILE"
+    clear
+    ui_banner
+    bn_render_devices_box
+
+    if [ ! -s "$STATE_FILE" ]; then
+        printf "\n${YELLOW}! Belum ada perangkat terdeteksi untuk diganti namanya.${NC}\n"
+        sleep 1
+        return
+    fi
+
+    local total_dev=$(wc -l < "$STATE_FILE" | tr -d ' ')
+    printf "\n${WHITE}Pilih Nomor perangkat yang diganti namanya (0 batal): ${NC}"
+    read dev_no
+
+    case "$dev_no" in
+        0|00|'') return ;;
+        *[!0-9]*)
+            printf "${BRED}✖ Masukkan angka nomor yang valid!${NC}\n"
+            sleep 1
+            return
+            ;;
+    esac
+
+    if [ "$dev_no" -lt 1 ] || [ "$dev_no" -gt "$total_dev" ]; then
+        printf "${BRED}✖ Nomor perangkat tidak ditemukan!${NC}\n"
+        sleep 1
+        return
+    fi
+
+    local line="$(sed -n "${dev_no}p" "$STATE_FILE")"
+    local t_mac="$(printf '%s' "$line" | awk -F'|' '{print $1}')"
+    local t_ip="$(printf '%s' "$line" | awk -F'|' '{print $2}')"
+    local t_old="$(printf '%s' "$line" | awk -F'|' '{print $4}')"
+
+    printf "${CYAN}MAC Address${NC} : ${WHITE}%s${NC} (${CYAN}%s${NC})\n" "$t_mac" "$t_ip"
+    printf "${CYAN}Nama Lama${NC}   : ${YELLOW}%s${NC}\n" "$t_old"
+    printf "${WHITE}Masukkan Nama Host Baru (0 batal): ${NC}"
+    read new_host
+
+    new_host="$(printf '%s' "$new_host" | tr -d '|/\r\n')"
+    [ -z "$new_host" ] || [ "$new_host" = "0" ] && return
+
+    grep -vi "^${t_mac}[[:space:]]" "$ALIAS_FILE" > /tmp/host_alias.tmp 2>/dev/null
+    printf '%s %s\n' "$t_mac" "$new_host" >> /tmp/host_alias.tmp
+    mv /tmp/host_alias.tmp "$ALIAS_FILE"
+
+    awk -F'|' -v m="$t_mac" -v nh="$new_host" 'BEGIN{OFS="|"} {if (tolower($1)==tolower(m)) $4=nh; print}' "$STATE_FILE" > /tmp/telenotif_ren.tmp 2>/dev/null
+    mv /tmp/telenotif_ren.tmp "$STATE_FILE"
+
+    printf "${BGREEN}✔ Nama host %s berhasil diubah menjadi '%s'!${NC}\n" "$t_mac" "$new_host"
+    sleep 1
+}
+
+# Fitur Langsung 2: Block / Unblock Perangkat (command: blockbot)
+bn_block_menu_screen() {
+    touch "$BLOCK_FILE" "$IGNORE_FILE"
+    while true; do
+        clear
+        ui_banner
+
+        local max_in="$(ui_max_inner)"
+        local longest_bhost=25
+        local b_idx=0
+        if [ -s "$BLOCK_FILE" ]; then
+            while IFS='|' read -r b_mac b_host _; do
+                [ -z "$b_mac" ] && continue
+                b_idx=$((b_idx + 1))
+                local bh="${b_host:-Perangkat Diblokir}"
+                [ ${#bh} -gt $longest_bhost ] && longest_bhost=${#bh}
+            done < "$BLOCK_FILE"
+        fi
+
+        local blk_inner=$(( 27 + longest_bhost ))
+        [ $blk_inner -lt 52 ] && blk_inner=52
+        [ $blk_inner -gt $max_in ] && blk_inner=$max_in
+        local w_bhost=$(( blk_inner - 27 ))
+
+        local hdr_bhost="$(printf "%-${w_bhost}s" "Nama / Host")"
+
+        ui_panel_top "$BRED" "$BGREEN" "[ Daftar Perangkat Diblokir ]" "[ Daftar Perangkat Diblokir ]" "$blk_inner"
+        ui_panel_line "$BRED" \
+            "  No  MAC Address        ${hdr_bhost}  " \
+            "  ${BMAGENTA}No  MAC Address        ${hdr_bhost}${NC}  " "$blk_inner"
+
+        if [ "$b_idx" -gt 0 ]; then
+            local cur_b=0
+            while IFS='|' read -r b_mac b_host _; do
+                [ -z "$b_mac" ] && continue
+                cur_b=$((cur_b + 1))
+                local no_f="$(printf '%2d' "$cur_b")"
+                local mac_f="$(printf '%-17s' "$b_mac")"
+                local bh_full="${b_host:-Perangkat Diblokir}"
+                local bh_disp="$bh_full"
+                if [ ${#bh_full} -gt $w_bhost ]; then
+                    bh_disp="$(printf '%s' "$bh_full" | cut -c1-$((w_bhost - 3)))..."
+                fi
+                local host_f="$(printf "%-${w_bhost}s" "$bh_disp")"
+                ui_panel_line "$BRED" \
+                    "  ${no_f}  ${mac_f}  ${host_f}  " \
+                    "  ${BGREEN}${no_f}${NC}  ${BRED}${mac_f}${NC}  ${WHITE}${host_f}${NC}  " "$blk_inner"
+            done < "$BLOCK_FILE"
+        else
+            ui_panel_line "$BRED" \
+                "  (Belum ada perangkat yang diblokir)" \
+                "  ${GRAY}(Belum ada perangkat yang diblokir)${NC}" "$blk_inner"
+        fi
+        ui_panel_bot "$BRED" "$blk_inner"
+
+        printf "\n"
+        ui_panel_top "$CYAN" "$BGREEN" ". Menu Block Perangkat ." "• Menu Block Perangkat •"
+        ui_panel_line "$CYAN" \
+            "  ID  Action                                        " \
+            "  ${BMAGENTA}ID  Action${NC}                                        "
+        ui_panel_line "$CYAN" \
+            "   1  Block Perangkat (Pilih Nomor: 1 / 1,2,3)      " \
+            "   ${BGREEN}1${NC}  ${WHITE}Block Perangkat${NC} ${YELLOW}(Pilih Nomor: 1 / 1,2,3)${NC}      "
+        ui_panel_line "$CYAN" \
+            "   2  Block Perangkat (Input MAC Manual)            " \
+            "   ${BGREEN}2${NC}  ${WHITE}Block Perangkat${NC} ${CYAN}(Input MAC Manual)${NC}            "
+        ui_panel_line "$CYAN" \
+            "   3  Unblock / Buka Blokir (Nomor: 1 / 1,2,3)      " \
+            "   ${BGREEN}3${NC}  ${WHITE}Unblock / Buka Blokir${NC} ${GREEN}(Nomor: 1 / 1,2,3)${NC}      "
+        ui_panel_line "$CYAN" \
+            "   0  Kembali                                       " \
+            "   ${BGREEN}0${NC}  ${WHITE}Kembali${NC}                                       "
+        ui_panel_bot "$CYAN"
+
+        printf "\n${WHITE}Pilih menu: ${NC}"
+        read b_opt
+
+        case "$b_opt" in
+            1)
+                if [ ! -s "$STATE_FILE" ]; then
+                    printf "\n${YELLOW}! Belum ada perangkat terdeteksi.${NC}\n"
+                    sleep 1
+                    continue
+                fi
+                printf "\n${CYAN}Daftar Perangkat Terdeteksi:${NC}\n"
+                local n=0
+                while IFS='|' read -r s_mac s_ip _ s_host _; do
+                    [ -z "$s_mac" ] && continue
+                    n=$((n + 1))
+                    printf "  ${BGREEN}%2d.${NC} ${WHITE}%s${NC} (${CYAN}%s${NC}) - ${YELLOW}%s${NC}\n" "$n" "$s_mac" "$s_ip" "$s_host"
+                done < "$STATE_FILE"
+
+                printf "\n${WHITE}Masukkan Nomor (contoh: 1 atau 1,2,3 / 0 batal): ${NC}"
+                read pick_raw
+                pick_raw="$(printf '%s' "$pick_raw" | tr -d ' \r\n')"
+                [ -z "$pick_raw" ] || [ "$pick_raw" = "0" ] && continue
+
+                local parsed_nums
+                parsed_nums="$(ui_parse_numbers "$pick_raw" "$n")"
+                if [ $? -ne 0 ] || [ -z "$parsed_nums" ]; then
+                    printf "${BRED}✖ Format nomor tidak valid atau di luar daftar (1-%d)!${NC}\n" "$n"
+                    sleep 1
+                    continue
+                fi
+
+                local targets=""
+                for pno in $parsed_nums; do
+                    local sel_line="$(sed -n "${pno}p" "$STATE_FILE")"
+                    [ -n "$sel_line" ] && targets="${targets}${sel_line}
+"
+                done
+
+                printf '%s' "$targets" | while IFS='|' read -r sel_mac sel_ip _ sel_host _; do
+                    [ -z "$sel_mac" ] && continue
+                    bn_add_block_entry "$sel_mac" "$sel_host" "$sel_ip"
+                    printf "${BGREEN}✔ Diblokir:${NC} ${WHITE}%s${NC} (${YELLOW}%s${NC})\n" "$sel_mac" "$sel_host"
+                done
+                bn_sync_firewall
+                sleep 1
+                ;;
+            2)
+                printf "\n${WHITE}Masukkan MAC Address (contoh 46:6e:76:d6:1b:61 / 0 batal): ${NC}"
+                read man_mac
+                man_mac="$(printf '%s' "$man_mac" | tr '-' ':' | tr '[:upper:]' '[:lower:]' | tr -d ' \r\n')"
+                [ -z "$man_mac" ] || [ "$man_mac" = "0" ] && continue
+                case "$man_mac" in
+                    ??:??:??:??:??:??)
+                        printf "${WHITE}Nama / Keterangan perangkat [Opsional]: ${NC}"
+                        read man_host
+                        [ -z "$man_host" ] && man_host="Blokir Manual"
+                        bn_add_block_entry "$man_mac" "$man_host" ""
+                        bn_sync_firewall
+                        printf "${BGREEN}✔ MAC %s (%s) berhasil diblokir!${NC}\n" "$man_mac" "$man_host"
+                        sleep 1
+                        ;;
+                    *)
+                        printf "${BRED}✖ Format MAC Address tidak valid!${NC}\n"
+                        sleep 1
+                        ;;
+                esac
+                ;;
+            3)
+                if [ "$b_idx" -eq 0 ]; then
+                    printf "\n${YELLOW}! Tidak ada perangkat di daftar blokir.${NC}\n"
+                    sleep 1
+                    continue
+                fi
+                printf "\n${WHITE}Masukkan Nomor blokir yang dibuka (contoh: 1 atau 1,2,3 / 0 batal): ${NC}"
+                read unb_raw
+                unb_raw="$(printf '%s' "$unb_raw" | tr -d ' \r\n')"
+                [ -z "$unb_raw" ] || [ "$unb_raw" = "0" ] && continue
+
+                local parsed_unb
+                parsed_unb="$(ui_parse_numbers "$unb_raw" "$b_idx")"
+                if [ $? -ne 0 ] || [ -z "$parsed_unb" ]; then
+                    printf "${BRED}✖ Format nomor tidak valid atau di luar daftar (1-%d)!${NC}\n" "$b_idx"
+                    sleep 1
+                    continue
+                fi
+
+                local unb_macs=""
+                for uno in $parsed_unb; do
+                    local u_line="$(sed -n "${uno}p" "$BLOCK_FILE")"
+                    local u_mac="$(printf '%s' "$u_line" | awk -F'|' '{print $1}')"
+                    [ -n "$u_mac" ] && unb_macs="${unb_macs} ${u_mac}"
+                done
+
+                for umac in $unb_macs; do
+                    bn_del_block_entry "$umac"
+                    printf "${BGREEN}✔ Dibuka blokir:${NC} ${WHITE}%s${NC}\n" "$umac"
+                done
+                bn_sync_firewall
+                sleep 1
+                ;;
+            0|00|q|Q)
+                return
+                ;;
+            *)
+                printf "\n${BRED}Pilihan tidak valid!${NC}\n"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 bn_create_binaries() {
@@ -657,7 +1043,7 @@ done
 EOF_DAEMON
     chmod +x /usr/bin/telenotif
 
-    # Perintah: resbotnotif
+    # Perintah langsung: resbotnotif
     cat << 'EOF_RES' > /usr/bin/resbotnotif
 #!/bin/sh
 . /usr/lib/kiheo/ui.sh
@@ -690,7 +1076,7 @@ ui_panel_bot "$CYAN"
 EOF_RES
     chmod +x /usr/bin/resbotnotif
 
-    # Perintah: stopbotnotif
+    # Perintah langsung: stopbotnotif
     cat << 'EOF_STOP' > /usr/bin/stopbotnotif
 #!/bin/sh
 . /usr/lib/kiheo/ui.sh
@@ -709,389 +1095,72 @@ ui_panel_bot "$CYAN"
 EOF_STOP
     chmod +x /usr/bin/stopbotnotif
 
-    # Perintah: cekbot & telenotif-status (Tabel Dinamis + Ganti Nama Host + Multi-Block/Unblock)
+    # Perintah langsung: cekbot & telenotif-status (LANGSUNG TAMPIL TANPA MENU)
     cat << 'EOF_CEK' > /usr/bin/cekbot
 #!/bin/sh
 . /usr/lib/kiheo/ui.sh
+. /usr/lib/kiheo/modules/botnotif.sh
 
-STATE_FILE="/tmp/telenotif_state.txt"
-ALIAS_FILE="/etc/config/host_alias.conf"
-BLOCK_FILE="/etc/telenotif_blocked.conf"
-IGNORE_FILE="/etc/telenotif.ignore"
+[ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
+: "${MAX_MISSES:=15}"
+: "${PROBE_INTERVAL:=2}"
 
-touch "$ALIAS_FILE" "$BLOCK_FILE" "$IGNORE_FILE"
+PIDS="$(ui_get_bot_pid)"
+NOW_TIME="$(ui_get_localtime)"
 
-cek_add_block_entry() {
-    local mac="$(printf '%s' "$1" | tr '-' ':' | tr '[:upper:]' '[:lower:]' | tr -d ' \r\n')"
-    local host="${2:-Perangkat Diblokir}"
-    local ip="$(printf '%s' "$3" | tr -d ' \r\n')"
-    local hex="$(printf '%s' "$mac" | tr -d ':')"
+ui_panel_top "$CYAN" "$BGREEN" "[ Status Bot Notifikasi ]" "[ Status Bot Notifikasi ]"
+if [ -n "$PIDS" ]; then
+    ui_panel_kv "$CYAN" "Status" "* AKTIF (PID: ${PIDS})" "${BGREEN}● AKTIF${NC} ${GRAY}(PID: ${PIDS})${NC}"
+else
+    ui_panel_kv "$CYAN" "Status" "* MATI / STOPPED" "${BRED}● MATI / STOPPED${NC}"
+fi
+ui_panel_kv "$CYAN" "Router / LAN" "${ROUTER_NAME:-KIHEO} (${FALLBACK_IFACE:-br-lan})" "${WHITE}${ROUTER_NAME:-KIHEO}${NC} ${GRAY}(${FALLBACK_IFACE:-br-lan})${NC}"
+ui_panel_kv "$CYAN" "Local Time" "${NOW_TIME}" "${WHITE}${NOW_TIME}${NC}"
+ui_panel_kv "$CYAN" "User ID Bot" "${CHAT_ID:--}" "${BMAGENTA}${CHAT_ID:--}${NC}"
+ui_panel_kv "$CYAN" "Mode Probe" "${MAX_MISSES}x gagal (interval ${PROBE_INTERVAL}s)" "${YELLOW}${MAX_MISSES}x gagal${NC} (interval ${CYAN}${PROBE_INTERVAL}s${NC})"
+ui_panel_bot "$CYAN"
 
-    awk -F'|' -v m="$mac" 'tolower($1) != m' "$BLOCK_FILE" > /tmp/telenotif_blk.tmp 2>/dev/null
-    printf '%s|%s|%s\n' "$mac" "$host" "$ip" >> /tmp/telenotif_blk.tmp
-    mv /tmp/telenotif_blk.tmp "$BLOCK_FILE"
-
-    grep -qi "^${mac}$" "$IGNORE_FILE" || printf '%s\n' "$mac" >> "$IGNORE_FILE"
-
-    if command -v uci >/dev/null 2>&1; then
-        uci -q delete "firewall.kiheo_blk_${hex}" >/dev/null 2>&1
-        uci set "firewall.kiheo_blk_${hex}=rule"
-        uci set "firewall.kiheo_blk_${hex}.name=KIHEO_BLOCK_${hex}"
-        uci set "firewall.kiheo_blk_${hex}.src=lan"
-        uci set "firewall.kiheo_blk_${hex}.src_mac=${mac}"
-        uci set "firewall.kiheo_blk_${hex}.target=DROP"
-    fi
-
-    if [ -f "$STATE_FILE" ]; then
-        awk -F'|' -v m="$mac" 'tolower($1) != m' "$STATE_FILE" > /tmp/telenotif_st_blk.tmp 2>/dev/null
-        mv /tmp/telenotif_st_blk.tmp "$STATE_FILE"
-    fi
-}
-
-cek_del_block_entry() {
-    local mac="$(printf '%s' "$1" | tr '-' ':' | tr '[:upper:]' '[:lower:]' | tr -d ' \r\n')"
-    local hex="$(printf '%s' "$mac" | tr -d ':')"
-
-    awk -F'|' -v m="$mac" 'tolower($1) != m' "$BLOCK_FILE" > /tmp/telenotif_blk.tmp 2>/dev/null
-    mv /tmp/telenotif_blk.tmp "$BLOCK_FILE"
-
-    grep -vi "^${mac}$" "$IGNORE_FILE" > /tmp/telenotif_ign.tmp 2>/dev/null
-    mv /tmp/telenotif_ign.tmp "$IGNORE_FILE"
-
-    if command -v uci >/dev/null 2>&1; then
-        uci -q delete "firewall.kiheo_blk_${hex}" >/dev/null 2>&1
-    fi
-}
-
-cek_sync_firewall() {
-    command -v uci >/dev/null 2>&1 && uci commit firewall >/dev/null 2>&1
-    [ -x /etc/kiheo/apply_block.sh ] && /etc/kiheo/apply_block.sh >/dev/null 2>&1
-}
-
-cek_rename_host() {
-    if [ ! -s "$STATE_FILE" ]; then
-        printf "\n${YELLOW}! Belum ada perangkat terdeteksi untuk diganti namanya.${NC}\n"
-        sleep 1
-        return
-    fi
-
-    local total_dev=$(wc -l < "$STATE_FILE" | tr -d ' ')
-    printf "\n${WHITE}Pilih Nomor perangkat yang ingin diganti namanya (0 batal): ${NC}"
-    read dev_no
-
-    case "$dev_no" in
-        0|00|'') return ;;
-        *[!0-9]*)
-            printf "${BRED}✖ Masukkan angka nomor yang valid!${NC}\n"
-            sleep 1
-            return
-            ;;
-    esac
-
-    if [ "$dev_no" -lt 1 ] || [ "$dev_no" -gt "$total_dev" ]; then
-        printf "${BRED}✖ Nomor perangkat tidak ditemukan!${NC}\n"
-        sleep 1
-        return
-    fi
-
-    local line="$(sed -n "${dev_no}p" "$STATE_FILE")"
-    local t_mac="$(printf '%s' "$line" | awk -F'|' '{print $1}')"
-    local t_ip="$(printf '%s' "$line" | awk -F'|' '{print $2}')"
-    local t_old="$(printf '%s' "$line" | awk -F'|' '{print $4}')"
-
-    printf "${CYAN}MAC Address${NC} : ${WHITE}%s${NC} (${CYAN}%s${NC})\n" "$t_mac" "$t_ip"
-    printf "${CYAN}Nama Lama${NC}   : ${YELLOW}%s${NC}\n" "$t_old"
-    printf "${WHITE}Masukkan Nama Host Baru (0 batal): ${NC}"
-    read new_host
-
-    new_host="$(printf '%s' "$new_host" | tr -d '|/\r\n')"
-    [ -z "$new_host" ] || [ "$new_host" = "0" ] && return
-
-    grep -vi "^${t_mac}[[:space:]]" "$ALIAS_FILE" > /tmp/host_alias.tmp 2>/dev/null
-    printf '%s %s\n' "$t_mac" "$new_host" >> /tmp/host_alias.tmp
-    mv /tmp/host_alias.tmp "$ALIAS_FILE"
-
-    awk -F'|' -v m="$t_mac" -v nh="$new_host" 'BEGIN{OFS="|"} {if (tolower($1)==tolower(m)) $4=nh; print}' "$STATE_FILE" > /tmp/telenotif_ren.tmp 2>/dev/null
-    mv /tmp/telenotif_ren.tmp "$STATE_FILE"
-
-    printf "${BGREEN}✔ Nama host %s berhasil diubah menjadi '%s'!${NC}\n" "$t_mac" "$new_host"
-    sleep 1
-}
-
-cek_block_menu() {
-    while true; do
-        clear
-        ui_banner
-
-        # Hitung lebar dinamis kotak Daftar Perangkat Diblokir
-        local w_bhost=25
-        local b_idx=0
-        if [ -s "$BLOCK_FILE" ]; then
-            while IFS='|' read -r b_mac b_host _; do
-                [ -z "$b_mac" ] && continue
-                b_idx=$((b_idx + 1))
-                local bh="${b_host:-Perangkat Diblokir}"
-                [ ${#bh} -gt $w_bhost ] && w_bhost=${#bh}
-            done < "$BLOCK_FILE"
-        fi
-        local blk_inner=$(( 27 + w_bhost ))
-        local hdr_bhost="$(printf "%-${w_bhost}s" "Nama / Host")"
-
-        ui_panel_top "$BRED" "$BGREEN" "[ Daftar Perangkat Diblokir ]" "[ Daftar Perangkat Diblokir ]" "$blk_inner"
-        ui_panel_line "$BRED" \
-            "  No  MAC Address        ${hdr_bhost}  " \
-            "  ${BMAGENTA}No  MAC Address        ${hdr_bhost}${NC}  " "$blk_inner"
-
-        if [ "$b_idx" -gt 0 ]; then
-            local cur_b=0
-            while IFS='|' read -r b_mac b_host _; do
-                [ -z "$b_mac" ] && continue
-                cur_b=$((cur_b + 1))
-                local no_f="$(printf '%2d' "$cur_b")"
-                local mac_f="$(printf '%-17s' "$b_mac")"
-                local host_f="$(printf "%-${w_bhost}s" "${b_host:-Perangkat Diblokir}")"
-                ui_panel_line "$BRED" \
-                    "  ${no_f}  ${mac_f}  ${host_f}  " \
-                    "  ${BGREEN}${no_f}${NC}  ${BRED}${mac_f}${NC}  ${WHITE}${host_f}${NC}  " "$blk_inner"
-            done < "$BLOCK_FILE"
-        else
-            ui_panel_line "$BRED" \
-                "  (Belum ada perangkat yang diblokir)" \
-                "  ${GRAY}(Belum ada perangkat yang diblokir)${NC}" "$blk_inner"
-        fi
-        ui_panel_bot "$BRED" "$blk_inner"
-
-        printf "\n"
-        ui_panel_top "$CYAN" "$BGREEN" ". Menu Block Perangkat ." "• Menu Block Perangkat •"
-        ui_panel_line "$CYAN" \
-            "  ID  Action                                        " \
-            "  ${BMAGENTA}ID  Action${NC}                                        "
-        ui_panel_line "$CYAN" \
-            "   1  Block Perangkat (Pilih Nomor: 1 / 1,2,3)      " \
-            "   ${BGREEN}1${NC}  ${WHITE}Block Perangkat${NC} ${YELLOW}(Pilih Nomor: 1 / 1,2,3)${NC}      "
-        ui_panel_line "$CYAN" \
-            "   2  Block Perangkat (Input MAC Manual)            " \
-            "   ${BGREEN}2${NC}  ${WHITE}Block Perangkat${NC} ${CYAN}(Input MAC Manual)${NC}            "
-        ui_panel_line "$CYAN" \
-            "   3  Unblock / Buka Blokir (Nomor: 1 / 1,2,3)      " \
-            "   ${BGREEN}3${NC}  ${WHITE}Unblock / Buka Blokir${NC} ${GREEN}(Nomor: 1 / 1,2,3)${NC}      "
-        ui_panel_line "$CYAN" \
-            "   0  Kembali                                       " \
-            "   ${BGREEN}0${NC}  ${WHITE}Kembali${NC}                                       "
-        ui_panel_bot "$CYAN"
-
-        printf "\n${WHITE}Pilih menu: ${NC}"
-        read b_opt
-
-        case "$b_opt" in
-            1)
-                if [ ! -s "$STATE_FILE" ]; then
-                    printf "\n${YELLOW}! Belum ada perangkat terdeteksi.${NC}\n"
-                    sleep 1
-                    continue
-                fi
-                printf "\n${CYAN}Daftar Perangkat Terdeteksi:${NC}\n"
-                local n=0
-                while IFS='|' read -r s_mac s_ip _ s_host _; do
-                    [ -z "$s_mac" ] && continue
-                    n=$((n + 1))
-                    printf "  ${BGREEN}%2d.${NC} ${WHITE}%s${NC} (${CYAN}%s${NC}) - ${YELLOW}%s${NC}\n" "$n" "$s_mac" "$s_ip" "$s_host"
-                done < "$STATE_FILE"
-
-                printf "\n${WHITE}Masukkan Nomor (contoh: 1 atau 1,2,3 / 0 batal): ${NC}"
-                read pick_raw
-                pick_raw="$(printf '%s' "$pick_raw" | tr -d ' \r\n')"
-                [ -z "$pick_raw" ] || [ "$pick_raw" = "0" ] && continue
-
-                local parsed_nums
-                parsed_nums="$(ui_parse_numbers "$pick_raw" "$n")"
-                if [ $? -ne 0 ] || [ -z "$parsed_nums" ]; then
-                    printf "${BRED}✖ Format nomor tidak valid atau di luar daftar (1-%d)!${NC}\n" "$n"
-                    sleep 1
-                    continue
-                fi
-
-                # Kumpulkan target MAC/Host/IP sebelum state diubah
-                local targets=""
-                for pno in $parsed_nums; do
-                    local sel_line="$(sed -n "${pno}p" "$STATE_FILE")"
-                    [ -n "$sel_line" ] && targets="${targets}${sel_line}
-"
-                done
-
-                local cnt_blk=0
-                printf '%s' "$targets" | while IFS='|' read -r sel_mac sel_ip _ sel_host _; do
-                    [ -z "$sel_mac" ] && continue
-                    cek_add_block_entry "$sel_mac" "$sel_host" "$sel_ip"
-                    printf "${BGREEN}✔ Diblokir:${NC} ${WHITE}%s${NC} (${YELLOW}%s${NC})\n" "$sel_mac" "$sel_host"
-                done
-                cek_sync_firewall
-                sleep 1
-                ;;
-            2)
-                printf "\n${WHITE}Masukkan MAC Address (contoh 46:6e:76:d6:1b:61 / 0 batal): ${NC}"
-                read man_mac
-                man_mac="$(printf '%s' "$man_mac" | tr '-' ':' | tr '[:upper:]' '[:lower:]' | tr -d ' \r\n')"
-                [ -z "$man_mac" ] || [ "$man_mac" = "0" ] && continue
-                case "$man_mac" in
-                    ??:??:??:??:??:??)
-                        printf "${WHITE}Nama / Keterangan perangkat [Opsional]: ${NC}"
-                        read man_host
-                        [ -z "$man_host" ] && man_host="Blokir Manual"
-                        cek_add_block_entry "$man_mac" "$man_host" ""
-                        cek_sync_firewall
-                        printf "${BGREEN}✔ MAC %s (%s) berhasil diblokir!${NC}\n" "$man_mac" "$man_host"
-                        sleep 1
-                        ;;
-                    *)
-                        printf "${BRED}✖ Format MAC Address tidak valid!${NC}\n"
-                        sleep 1
-                        ;;
-                esac
-                ;;
-            3)
-                if [ "$b_idx" -eq 0 ]; then
-                    printf "\n${YELLOW}! Tidak ada perangkat di daftar blokir.${NC}\n"
-                    sleep 1
-                    continue
-                fi
-                printf "\n${WHITE}Masukkan Nomor blokir yang dibuka (contoh: 1 atau 1,2,3 / 0 batal): ${NC}"
-                read unb_raw
-                unb_raw="$(printf '%s' "$unb_raw" | tr -d ' \r\n')"
-                [ -z "$unb_raw" ] || [ "$unb_raw" = "0" ] && continue
-
-                local parsed_unb
-                parsed_unb="$(ui_parse_numbers "$unb_raw" "$b_idx")"
-                if [ $? -ne 0 ] || [ -z "$parsed_unb" ]; then
-                    printf "${BRED}✖ Format nomor tidak valid atau di luar daftar (1-%d)!${NC}\n" "$b_idx"
-                    sleep 1
-                    continue
-                fi
-
-                # Kumpulkan MAC terlebih dahulu agar nomor baris tidak bergeser saat dihapus
-                local unb_macs=""
-                for uno in $parsed_unb; do
-                    local u_line="$(sed -n "${uno}p" "$BLOCK_FILE")"
-                    local u_mac="$(printf '%s' "$u_line" | awk -F'|' '{print $1}')"
-                    [ -n "$u_mac" ] && unb_macs="${unb_macs} ${u_mac}"
-                done
-
-                for umac in $unb_macs; do
-                    cek_del_block_entry "$umac"
-                    printf "${BGREEN}✔ Dibuka blokir:${NC} ${WHITE}%s${NC}\n" "$umac"
-                done
-                cek_sync_firewall
-                sleep 1
-                ;;
-            0|00|q|Q)
-                return
-                ;;
-            *)
-                printf "\n${BRED}Pilihan tidak valid!${NC}\n"
-                sleep 1
-                ;;
-        esac
-    done
-}
-
-while true; do
-    [ -f /etc/telenotif.conf ] && . /etc/telenotif.conf
-    : "${MAX_MISSES:=15}"
-    : "${PROBE_INTERVAL:=2}"
-
-    PIDS="$(ui_get_bot_pid)"
-    NOW_TIME="$(ui_get_localtime)"
-
-    # Hitung lebar dinamis kolom IP dan Host agar nama panjang tidak terpotong
-    w_ip=13
-    w_host=9
-    if [ -s "$STATE_FILE" ]; then
-        while IFS='|' read -r _ s_ip _ s_host _; do
-            [ ${#s_ip} -gt $w_ip ] && w_ip=${#s_ip}
-            [ ${#s_host} -gt $w_host ] && w_host=${#s_host}
-        done < "$STATE_FILE"
-    fi
-    dev_inner=$(( 30 + w_ip + w_host ))
-    hdr_ip="$(printf "%-${w_ip}s" "IP Address")"
-    hdr_host="$(printf "%-${w_host}s" "Host")"
-
-    clear
-    ui_panel_top "$CYAN" "$BGREEN" "[ Status Bot Notifikasi ]" "[ Status Bot Notifikasi ]"
-    if [ -n "$PIDS" ]; then
-        ui_panel_kv "$CYAN" "Status" "* AKTIF (PID: ${PIDS})" "${BGREEN}● AKTIF${NC} ${GRAY}(PID: ${PIDS})${NC}"
-    else
-        ui_panel_kv "$CYAN" "Status" "* MATI / STOPPED" "${BRED}● MATI / STOPPED${NC}"
-    fi
-    ui_panel_kv "$CYAN" "Router / LAN" "${ROUTER_NAME:-KIHEO} (${FALLBACK_IFACE:-br-lan})" "${WHITE}${ROUTER_NAME:-KIHEO}${NC} ${GRAY}(${FALLBACK_IFACE:-br-lan})${NC}"
-    ui_panel_kv "$CYAN" "Local Time" "${NOW_TIME}" "${WHITE}${NOW_TIME}${NC}"
-    ui_panel_kv "$CYAN" "User ID Bot" "${CHAT_ID:--}" "${BMAGENTA}${CHAT_ID:--}${NC}"
-    ui_panel_kv "$CYAN" "Mode Probe" "${MAX_MISSES}x gagal (interval ${PROBE_INTERVAL}s)" "${YELLOW}${MAX_MISSES}x gagal${NC} (interval ${CYAN}${PROBE_INTERVAL}s${NC})"
-    ui_panel_bot "$CYAN"
-
-    printf "\n"
-
-    ui_panel_top "$BRED" "$BGREEN" ". Perangkat Terdeteksi ." "• Perangkat Terdeteksi •" "$dev_inner"
-    ui_panel_line "$BRED" \
-        " No MAC Address       ${hdr_ip} ${hdr_host} Status" \
-        " ${BMAGENTA}No MAC Address       ${hdr_ip} ${hdr_host} Status${NC}" "$dev_inner"
-
-    if [ -s "$STATE_FILE" ]; then
-        dev_idx=0
-        while IFS='|' read -r mac ip iface host miss; do
-            [ -z "$mac" ] && continue
-            [ -z "$miss" ] && miss=0
-            dev_idx=$((dev_idx + 1))
-            no_f="$(printf '%2d' "$dev_idx")"
-            mac_f="$(printf '%-17s' "$mac")"
-            ip_f="$(printf "%-${w_ip}s" "$ip")"
-            host_f="$(printf "%-${w_host}s" "$host")"
-            if [ "$miss" -eq 0 ]; then
-                st_plain="ONLINE"
-                st_color="${BGREEN}ONLINE${NC}"
-            else
-                st_plain="$(printf 'RTRY %s' "$miss" | cut -c1-6)"
-                st_plain="$(printf '%-6s' "$st_plain")"
-                st_color="${YELLOW}${st_plain}${NC}"
-            fi
-            row_plain=" ${no_f} ${mac_f} ${ip_f} ${host_f} ${st_plain}"
-            row_color=" ${BGREEN}${no_f}${NC} ${WHITE}${mac_f}${NC} ${CYAN}${ip_f}${NC} ${WHITE}${host_f}${NC} ${st_color}"
-            ui_panel_line "$BRED" "$row_plain" "$row_color" "$dev_inner"
-        done < "$STATE_FILE"
-    else
-        ui_panel_line "$BRED" \
-            "   (Belum ada perangkat aktif yang terdeteksi)" \
-            "   ${GRAY}(Belum ada perangkat aktif yang terdeteksi)${NC}" "$dev_inner"
-    fi
-    ui_panel_bot "$BRED" "$dev_inner"
-
-    printf "\n"
-    ui_panel_top "$MAGENTA" "$BMAGENTA" ". Menu Perangkat ." "• Menu Perangkat •"
-    ui_panel_line "$MAGENTA" \
-        "  ID  Action                                        " \
-        "  ${BMAGENTA}ID  Action${NC}                                        "
-    ui_panel_line "$MAGENTA" \
-        "   1  Ganti Nama Host                               " \
-        "   ${BGREEN}1${NC}  ${WHITE}Ganti Nama Host${NC}                               "
-    ui_panel_line "$MAGENTA" \
-        "   2  Block Perangkat                               " \
-        "   ${BGREEN}2${NC}  ${WHITE}Block Perangkat${NC}                               "
-    ui_panel_line "$MAGENTA" \
-        "   0  Kembali                                       " \
-        "   ${BGREEN}0${NC}  ${WHITE}Kembali${NC}                                       "
-    ui_panel_bot "$MAGENTA"
-
-    printf "\n${WHITE}Pilih menu: ${NC}"
-    read dev_opt
-    case "$dev_opt" in
-        1) cek_rename_host ;;
-        2) cek_block_menu ;;
-        0|00|q|Q) exit 0 ;;
-        *) printf "\n${BRED}Pilihan tidak valid!${NC}\n"; sleep 1 ;;
-    esac
-done
+printf "\n"
+bn_render_devices_box
 EOF_CEK
     chmod +x /usr/bin/cekbot
     ln -sf /usr/bin/cekbot /usr/bin/telenotif-status
+
+    # Perintah langsung: hostbot (Ganti Nama Host tanpa masuk menu utama)
+    cat << 'EOF_HOSTBOT' > /usr/bin/hostbot
+#!/bin/sh
+. /usr/lib/kiheo/ui.sh
+. /usr/lib/kiheo/modules/botnotif.sh
+bn_rename_host_screen
+EOF_HOSTBOT
+    chmod +x /usr/bin/hostbot
+
+    # Perintah langsung: blockbot (Block / Unblock Perangkat tanpa masuk menu utama)
+    cat << 'EOF_BLOCKBOT' > /usr/bin/blockbot
+#!/bin/sh
+. /usr/lib/kiheo/ui.sh
+. /usr/lib/kiheo/modules/botnotif.sh
+bn_block_menu_screen
+EOF_BLOCKBOT
+    chmod +x /usr/bin/blockbot
+
+    # Perintah langsung: idbot (Kelola User ID Bot tanpa masuk menu utama)
+    cat << 'EOF_IDBOT' > /usr/bin/idbot
+#!/bin/sh
+. /usr/lib/kiheo/ui.sh
+. /usr/lib/kiheo/modules/botnotif.sh
+bn_manage_user_ids
+EOF_IDBOT
+    chmod +x /usr/bin/idbot
+
+    # Perintah langsung: probebot (Ubah Mode Probe tanpa masuk menu utama)
+    cat << 'EOF_PROBEBOT' > /usr/bin/probebot
+#!/bin/sh
+. /usr/lib/kiheo/ui.sh
+. /usr/lib/kiheo/modules/botnotif.sh
+bn_edit_probe
+EOF_PROBEBOT
+    chmod +x /usr/bin/probebot
 }
 
 bn_install() {
@@ -1324,6 +1393,7 @@ bn_uninstall_only() {
     done
     rm -f /var/run/telenotif.pid "$CONF_FILE" "$USERS_FILE" \
           /usr/bin/telenotif /usr/bin/telenotif-status /usr/bin/cekbot \
+          /usr/bin/hostbot /usr/bin/blockbot /usr/bin/idbot /usr/bin/probebot \
           /usr/bin/resbotnotif /usr/bin/stopbotnotif \
           /tmp/telenotif_*.txt /tmp/chilli_raw.txt
     printf "\n"
@@ -1339,18 +1409,27 @@ bn_manage_user_ids() {
         clear
         ui_banner
 
+        local max_in="$(ui_max_inner)"
         local ids_spaced="$(printf '%s' "$CHAT_ID" | tr ',;' '  ')"
-        local w_uid=16
-        local w_name=12
+        local w_uid=15
+        local longest_name=15
         local idx=0
         for uid in $ids_spaced; do
             [ -z "$uid" ] && continue
             idx=$((idx + 1))
             local u_name="$(bn_get_user_name "$uid")"
             [ ${#uid} -gt $w_uid ] && w_uid=${#uid}
-            [ ${#u_name} -gt $w_name ] && w_name=${#u_name}
+            [ ${#u_name} -gt $longest_name ] && longest_name=${#u_name}
         done
-        local usr_inner=$(( 24 + w_uid + w_name ))
+        [ $w_uid -gt 18 ] && w_uid=18
+
+        # Total inner = 22 + w_uid + w_name
+        local usr_inner=$(( 22 + w_uid + longest_name ))
+        [ $usr_inner -lt 52 ] && usr_inner=52
+        [ $usr_inner -gt $max_in ] && usr_inner=$max_in
+        local w_name=$(( usr_inner - 22 - w_uid ))
+        [ $w_name -lt 10 ] && w_name=10
+
         local hdr_uid="$(printf "%-${w_uid}s" "User / Chat ID")"
         local hdr_name="$(printf "%-${w_name}s" "Nama")"
 
@@ -1367,9 +1446,16 @@ bn_manage_user_ids() {
                 local id_type="Personal"
                 case "$uid" in -*) id_type="Grup/Channel" ;; esac
                 local u_name="$(bn_get_user_name "$uid")"
+
+                local uid_disp="$uid"
+                [ ${#uid} -gt $w_uid ] && uid_disp="$(printf '%s' "$uid" | cut -c1-$((w_uid - 3)))..."
+
+                local name_disp="$u_name"
+                [ ${#u_name} -gt $w_name ] && name_disp="$(printf '%s' "$u_name" | cut -c1-$((w_name - 3)))..."
+
                 local no_f="$(printf '%2d' "$cur_i")"
-                local uid_f="$(printf "%-${w_uid}s" "$uid")"
-                local name_f="$(printf "%-${w_name}s" "$u_name")"
+                local uid_f="$(printf "%-${w_uid}s" "$uid_disp")"
+                local name_f="$(printf "%-${w_name}s" "$name_disp")"
                 local typ_f="$(printf '%-12s' "$id_type")"
                 ui_panel_line "$CYAN" \
                     "  ${no_f}  ${uid_f} ${name_f} ${typ_f}  " \
@@ -1601,23 +1687,29 @@ botnotif_menu() {
                 "   2  Cek Status & Perangkat (cekbot)               " \
                 "   ${BGREEN}2${NC}  ${WHITE}Cek Status & Perangkat${NC} ${GREEN}(cekbot)${NC}               "
             ui_panel_line "$BRED" \
-                "   3  Stop / Matikan Bot (stopbotnotif)             " \
-                "   ${BGREEN}3${NC}  ${WHITE}Stop / Matikan Bot${NC} ${RED}(stopbotnotif)${NC}             "
+                "   3  Ganti Nama Host Perangkat (hostbot)           " \
+                "   ${BGREEN}3${NC}  ${WHITE}Ganti Nama Host Perangkat${NC} ${YELLOW}(hostbot)${NC}           "
             ui_panel_line "$BRED" \
-                "   4  Tambah / Kelola User ID Bot                   " \
-                "   ${BGREEN}4${NC}  ${WHITE}Tambah / Kelola${NC} ${BMAGENTA}User ID Bot${NC}                   "
+                "   4  Block / Unblock Perangkat (blockbot)          " \
+                "   ${BGREEN}4${NC}  ${WHITE}Block / Unblock Perangkat${NC} ${RED}(blockbot)${NC}          "
             ui_panel_line "$BRED" \
-                "   5  Ubah Mode Probe (Batas & Interval)            " \
-                "   ${BGREEN}5${NC}  ${WHITE}Ubah Mode Probe${NC} ${YELLOW}(Batas & Interval)${NC}            "
+                "   5  Stop / Matikan Bot (stopbotnotif)             " \
+                "   ${BGREEN}5${NC}  ${WHITE}Stop / Matikan Bot${NC} ${RED}(stopbotnotif)${NC}             "
             ui_panel_line "$BRED" \
-                "   6  Install Ulang / Konfigurasi Ulang             " \
-                "   ${BGREEN}6${NC}  ${WHITE}Install Ulang / Konfigurasi Ulang${NC}             "
+                "   6  Kelola User ID Bot (idbot)                    " \
+                "   ${BGREEN}6${NC}  ${WHITE}Kelola User ID Bot${NC} ${BMAGENTA}(idbot)${NC}                    "
             ui_panel_line "$BRED" \
-                "   7  Hapus / Uninstall Bot Notif                   " \
-                "   ${BGREEN}7${NC}  ${WHITE}Hapus / Uninstall Bot Notif${NC}                   "
+                "   7  Ubah Mode Probe (probebot)                    " \
+                "   ${BGREEN}7${NC}  ${WHITE}Ubah Mode Probe${NC} ${YELLOW}(probebot)${NC}                    "
             ui_panel_line "$BRED" \
-                "   0  Kembali ke Menu Utama kiheo                   " \
-                "   ${BGREEN}0${NC}  ${WHITE}Kembali ke Menu Utama kiheo${NC}                   "
+                "   8  Install Ulang / Konfigurasi Ulang             " \
+                "   ${BGREEN}8${NC}  ${WHITE}Install Ulang / Konfigurasi Ulang${NC}             "
+            ui_panel_line "$BRED" \
+                "   9  Hapus / Uninstall Bot Notif                   " \
+                "   ${BGREEN}9${NC}  ${WHITE}Hapus / Uninstall Bot Notif${NC}                   "
+            ui_panel_line "$BRED" \
+                "   0  Kembali                                       " \
+                "   ${BGREEN}0${NC}  ${WHITE}Kembali${NC}                                       "
             ui_panel_bot "$BRED"
 
             printf "\n${WHITE}Pilih menu: ${NC}"
@@ -1630,26 +1722,35 @@ botnotif_menu() {
                     read _
                     ;;
                 2)
+                    clear
                     /usr/bin/cekbot
+                    printf "\n${GRAY}Tekan Enter untuk kembali...${NC}"
+                    read _
                     ;;
                 3)
+                    bn_rename_host_screen
+                    ;;
+                4)
+                    bn_block_menu_screen
+                    ;;
+                5)
                     printf "\n"
                     /usr/bin/stopbotnotif
                     printf "\n${GRAY}Tekan Enter untuk kembali...${NC}"
                     read _
                     ;;
-                4)
+                6)
                     bn_manage_user_ids
                     ;;
-                5)
+                7)
                     bn_edit_probe
                     ;;
-                6)
+                8)
                     bn_install
                     printf "\n${GRAY}Tekan Enter untuk kembali...${NC}"
                     read _
                     ;;
-                7)
+                9)
                     printf "\n${BRED}Yakin hapus Bot Notifikasi? [y/N]: ${NC}"
                     read cf
                     case "$cf" in
@@ -1735,6 +1836,7 @@ uninstall_kiheo_hub() {
             command -v nft >/dev/null 2>&1 && nft delete table inet kiheo_block >/dev/null 2>&1
             rm -rf /usr/lib/kiheo /etc/kiheo /usr/bin/kiheo \
                    /usr/bin/telenotif /usr/bin/telenotif-status /usr/bin/cekbot \
+                   /usr/bin/hostbot /usr/bin/blockbot /usr/bin/idbot /usr/bin/probebot \
                    /usr/bin/resbotnotif /usr/bin/stopbotnotif /etc/telenotif.conf \
                    /etc/telenotif_users.conf /var/run/telenotif.pid \
                    /tmp/telenotif_*.txt /tmp/chilli_raw.txt
@@ -1757,7 +1859,6 @@ while true; do
         [ -f "$f" ] && PLUGIN_COUNT=$((PLUGIN_COUNT + 1))
     done
 
-    # TAHAP 1: Menu belum dipasang -> 1. Install Menu & 0. Kembali
     if [ ! -f "$MENU_FLAG" ] && ! bn_is_installed && [ "$PLUGIN_COUNT" -eq 0 ]; then
         clear
         ui_banner
@@ -1802,7 +1903,6 @@ while true; do
         continue
     fi
 
-    # TAHAP 2: Menu Utama lengkap
     if bn_is_installed; then
         if [ -n "$(ui_get_bot_pid)" ]; then
             NOTIF_ST_PLAIN="* AKTIF (Running)"
@@ -1915,7 +2015,7 @@ done
 EOF_KIHEO_MAIN
 chmod +x /usr/bin/kiheo
 
-# Jika konfigurasi lama sudah ada, perbarui binary daemon & restart otomatis tanpa ubah setting user
+# Jika konfigurasi lama sudah ada, perbarui semua binary & restart otomatis tanpa ubah setting user
 if [ -f /etc/telenotif.conf ]; then
     . /usr/lib/kiheo/modules/botnotif.sh
     bn_create_binaries
@@ -1931,9 +2031,11 @@ clear
 . /usr/lib/kiheo/ui.sh
 ui_banner
 ui_panel_top "$CYAN" "$BGREEN" "[ Pemasangan Selesai ]" "[ Pemasangan Selesai ]"
-ui_panel_kv "$CYAN" "Menu Utama" "Ketik 'kiheo'" "${BCYAN}Ketik 'kiheo'${NC}"
-ui_panel_kv "$CYAN" "Cek Status" "Ketik 'cekbot'" "${BGREEN}Ketik 'cekbot'${NC}"
-ui_panel_kv "$CYAN" "Restart Bot" "Ketik 'resbotnotif'" "${YELLOW}Ketik 'resbotnotif'${NC}"
+ui_panel_kv "$CYAN" "Cek Status" "Ketik 'cekbot' (Langsung tampil)" "${BGREEN}Ketik 'cekbot'${NC} ${GRAY}(Tanpa menu)${NC}"
+ui_panel_kv "$CYAN" "Ganti Host" "Ketik 'hostbot'" "${YELLOW}Ketik 'hostbot'${NC}"
+ui_panel_kv "$CYAN" "Block MAC" "Ketik 'blockbot'" "${BRED}Ketik 'blockbot'${NC}"
+ui_panel_kv "$CYAN" "User ID Bot" "Ketik 'idbot'" "${BMAGENTA}Ketik 'idbot'${NC}"
+ui_panel_kv "$CYAN" "Mode Probe" "Ketik 'probebot'" "${CYAN}Ketik 'probebot'${NC}"
+ui_panel_kv "$CYAN" "Restart Bot" "Ketik 'resbotnotif'" "${WHITE}Ketik 'resbotnotif'${NC}"
 ui_panel_kv "$CYAN" "Stop Bot" "Ketik 'stopbotnotif'" "${RED}Ketik 'stopbotnotif'${NC}"
-ui_panel_kv "$CYAN" "Folder Bot" "/etc/kiheo/plugins/" "${BMAGENTA}/etc/kiheo/plugins/${NC}"
 ui_panel_bot "$CYAN"
